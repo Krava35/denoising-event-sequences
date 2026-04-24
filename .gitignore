@@ -78,6 +78,8 @@ Thumbs.db
 *~
 .project
 .pydevproject
+CLAUDE.md
+TASK.md
 
 # pytest
 .pytest_cache/
