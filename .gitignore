@@ -79,6 +79,7 @@ Thumbs.db
 .project
 .pydevproject
 CLAUDE.md
+AGENTS.md
 TASK.md
 
 # pytest
