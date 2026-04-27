@@ -1,0 +1,30 @@
+# A3: + transition-aware replacement (built on A2b).
+# NOTE: EDA shows high entropy (~3.1–3.3 bits) across all three datasets,
+# meaning transitions are near-uniform. This ablation is kept to
+# CONFIRM empirically that transition-aware adds no value.
+# Expected result: A3 ≈ A2b (no meaningful difference).
+
+corruption:
+  event_type:
+    use_transition_aware_replacement: true
+    transition_replace_prob: 0.08
+    random_replace_prob: 0.02
+
+  time_noise:
+    corruption_prob: 0.30
+    min_std: 0.05
+    max_std: 0.30
+    sampling_level: "batch"
+
+  numerical_noise:
+    corruption_prob: 0.20
+    min_std: 0.03
+    max_std: 0.15
+    sampling_level: "batch"
+
+  categorical_features:
+    mask_prob: 0.15
+    random_replace_prob: 0.05
+
+  event_level_masking:
+    prob: 0.00

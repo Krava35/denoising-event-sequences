@@ -1,0 +1,29 @@
+# A2: Mixed-type corruption at LOW rate.
+# Adds time, numerical, and categorical corruption to A1.
+# No transition-aware replacement. No event-level masking.
+# Compare with A2b to measure sensitivity to corruption rate.
+
+corruption:
+  event_type:
+    use_transition_aware_replacement: false
+    transition_replace_prob: 0.00
+    random_replace_prob: 0.10
+
+  time_noise:
+    corruption_prob: 0.15
+    min_std: 0.03
+    max_std: 0.15
+    sampling_level: "batch"
+
+  numerical_noise:
+    corruption_prob: 0.10
+    min_std: 0.02
+    max_std: 0.08
+    sampling_level: "batch"
+
+  categorical_features:
+    mask_prob: 0.08
+    random_replace_prob: 0.02
+
+  event_level_masking:
+    prob: 0.00

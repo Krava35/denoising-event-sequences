@@ -78,6 +78,10 @@ Thumbs.db
 *~
 .project
 .pydevproject
+CLAUDE.md
+AGENTS.md
+TASK.md
+CHECKLIST.md
 
 # pytest
 .pytest_cache/
@@ -96,3 +100,6 @@ dmypy.json
 
 # Kaggle
 kaggle.json
+
+# Root-level base.yaml — canonical config lives in configs/base.yaml
+/base.yaml

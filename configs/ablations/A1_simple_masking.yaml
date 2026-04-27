@@ -1,0 +1,22 @@
+# A1: BERT-style masking only — event_type positions masked/replaced/kept.
+# No time, numerical, or categorical corruption.
+# Baseline for measuring the benefit of mixed-type corruption (A2/A2b).
+
+corruption:
+  event_type:
+    use_transition_aware_replacement: false
+    transition_replace_prob: 0.00
+    random_replace_prob: 0.10
+
+  time_noise:
+    corruption_prob: 0.00
+
+  numerical_noise:
+    corruption_prob: 0.00
+
+  categorical_features:
+    mask_prob: 0.00
+    random_replace_prob: 0.00
+
+  event_level_masking:
+    prob: 0.00

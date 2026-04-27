@@ -21,7 +21,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install ruff
         run: pip install ruff
@@ -36,7 +36,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11"]
+        python-version: ["3.12"]
 
     steps:
       - uses: actions/checkout@v4
@@ -72,7 +72,7 @@ jobs:
 
       - name: Upload coverage
         uses: codecov/codecov-action@v4
-        if: matrix.python-version == '3.11'
+        if: matrix.python-version == '3.12'
         with:
           files: coverage.xml
           fail_ci_if_error: false
@@ -88,13 +88,13 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Cache pip
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: pip-3.11-smoke-${{ hashFiles('requirements.txt') }}
+          key: pip-3.12-smoke-${{ hashFiles('requirements.txt') }}
 
       - name: Install dependencies
         run: |
@@ -105,7 +105,7 @@ jobs:
 
       - name: Run smoke test
         run: |
-          pytest tests/test_smoke.py -m "smoke" \
+          pytest tests/ -m "smoke" \
             --tb=short \
             -v \
             --timeout=120
@@ -121,7 +121,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install pyyaml
         run: pip install pyyaml
@@ -160,19 +160,20 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install dependencies
         run: |
+          pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install pyyaml
+          pip install numpy pyyaml
           pip install -e .
 
       - name: Run seed utils
-        run: python src/utils/seed.py
+        run: python -m src.utils.seed
 
       - name: Run config utils
-        run: python src/utils/config.py
+        run: python -m src.utils.config
 
       - name: Run logging utils
-        run: python src/utils/logging.py
+        run: python -m src.utils.logging

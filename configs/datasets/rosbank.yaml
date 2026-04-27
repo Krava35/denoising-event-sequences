@@ -1,0 +1,29 @@
+_dataset: "rosbank"
+_description: "Rosbank churn prediction. Binary. Short sequences (median=83, p95=243)."
+
+data:
+  max_seq_len: 256
+  min_seq_len: 5
+  event_type_col: "MCC"
+  timestamp_col: "TRDATETIME"
+  target_col: "target_flag"
+  numerical_cols: ["amount"]
+  categorical_cols: ["channel_type", "trx_category", "currency"]
+  group_col: "cl_id"
+  amount_transform: "robust_scaler"
+  amount_cols: ["amount"]
+  robust_scale_cols: ["amount"]
+  time_transform: "none"
+
+corruption:
+  time_noise:
+    corruption_prob: 0.00
+  event_type:
+    use_transition_aware_replacement: false
+    transition_replace_prob: 0.00
+    random_replace_prob: 0.10
+
+training:
+  task: "binary"
+  num_classes: 2
+  main_metrics: ["roc_auc", "pr_auc", "macro_f1"]
