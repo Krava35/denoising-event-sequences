@@ -6,7 +6,7 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-_REQUIRED_KEYS = ("corruption", "model", "training")
+_REQUIRED_KEYS = ("data", "corruption", "model", "training")
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -37,6 +37,40 @@ def load_config(path: str, override: str | None = None) -> dict:
     return config
 
 
+def _load_yaml(path: str) -> dict:
+    """Load YAML without required-key validation (for partial override configs)."""
+    with open(path) as f:
+        return yaml.safe_load(f) or {}
+
+
+def load_experiment_config(
+    base_path: str = "configs/base.yaml",
+    dataset_path: str | None = None,
+    ablation_path: str | None = None,
+) -> dict:
+    """
+    Load config with three-level merge.
+
+    Priority (highest → lowest):
+      ablation_path > dataset_path > base_path
+
+    Example:
+      config = load_experiment_config(
+          base_path="configs/base.yaml",
+          dataset_path="configs/datasets/rosbank.yaml",
+          ablation_path="configs/ablations/A3_transition_aware.yaml",
+      )
+    """
+    config = load_config(base_path)
+    if dataset_path:
+        config = _deep_merge(config, _load_yaml(dataset_path))
+        logger.info("Merged dataset config from %s", dataset_path)
+    if ablation_path:
+        config = _deep_merge(config, _load_yaml(ablation_path))
+        logger.info("Merged ablation config from %s", ablation_path)
+    return config
+
+
 def save_config(config: dict, path: str) -> None:
     output = {
         "_metadata": {"saved_at": datetime.now(timezone.utc).isoformat()},
@@ -55,6 +89,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(name)s - %(message)s")
 
     base_data = {
+        "data": {"max_seq_len": 256},
         "corruption": {"event_type": {"mask_prob": 0.28}},
         "model": {"hidden_dim": 256, "num_layers": 4},
         "training": {"batch_size": 128, "lr": 3e-4},
@@ -104,5 +139,26 @@ if __name__ == "__main__":
             raise AssertionError("Expected KeyError")
         except KeyError as e:
             print(f"Validation check passed: {e}")
+
+        # load_experiment_config: three-level merge
+        dataset_data = {"data": {"max_seq_len": 512}, "training": {"task": "binary"}}
+        ablation_data = {"corruption": {"event_type": {"use_transition_aware_replacement": True}}}
+        dataset_path2 = os.path.join(tmpdir, "dataset.yaml")
+        ablation_path2 = os.path.join(tmpdir, "ablation.yaml")
+        with open(dataset_path2, "w") as f:
+            yaml.dump(dataset_data, f)
+        with open(ablation_path2, "w") as f:
+            yaml.dump(ablation_data, f)
+
+        cfg3 = load_experiment_config(base_path, dataset_path2, ablation_path2)
+        assert cfg3["data"]["max_seq_len"] == 512, "dataset must override base"
+        assert cfg3["model"]["hidden_dim"] == 256, "base preserved"
+        assert cfg3["training"]["task"] == "binary", "dataset field present"
+        assert cfg3["corruption"]["event_type"]["use_transition_aware_replacement"] is True
+        assert cfg3["corruption"]["event_type"]["mask_prob"] == 0.28, "base preserved"
+
+        # load_experiment_config without dataset/ablation == load_config
+        cfg4 = load_experiment_config(base_path)
+        assert cfg4["model"]["hidden_dim"] == 256
 
     print("All checks passed.")

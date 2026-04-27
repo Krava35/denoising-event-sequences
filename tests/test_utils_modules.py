@@ -33,6 +33,7 @@ def test_config_load_merge_and_save(tmp_path: Path) -> None:
     out_path = tmp_path / "saved.yaml"
 
     base_data = {
+        "data": {"max_seq_len": 256, "min_seq_len": 2},
         "corruption": {"event_type": {"mask_prob": 0.25}},
         "model": {"hidden_dim": 128, "num_layers": 4},
         "training": {"batch_size": 64, "lr": 3e-4},

@@ -30,12 +30,18 @@ def collate_fn(batch: list[dict]) -> dict:
     labels = torch.stack([item["label"] for item in batch])
     entity_ids = [item["entity_id"] for item in batch]
 
-    assert event_type.shape == (B, max_L)
-    assert time_delta.shape == (B, max_L)
-    assert num_features.shape == (B, max_L, n_num)
-    assert cat_features.shape == (B, max_L, n_cat)
-    assert attention_mask.shape == (B, max_L)
-    assert labels.shape == (B,)
+    if event_type.shape != (B, max_L):
+        raise ValueError(f"event_type shape {event_type.shape} != ({B}, {max_L})")
+    if time_delta.shape != (B, max_L):
+        raise ValueError(f"time_delta shape {time_delta.shape} != ({B}, {max_L})")
+    if num_features.shape != (B, max_L, n_num):
+        raise ValueError(f"num_features shape {num_features.shape} != ({B}, {max_L}, {n_num})")
+    if cat_features.shape != (B, max_L, n_cat):
+        raise ValueError(f"cat_features shape {cat_features.shape} != ({B}, {max_L}, {n_cat})")
+    if attention_mask.shape != (B, max_L):
+        raise ValueError(f"attention_mask shape {attention_mask.shape} != ({B}, {max_L})")
+    if labels.shape != (B,):
+        raise ValueError(f"labels shape {labels.shape} != ({B},)")
 
     return {
         "event_type": event_type,

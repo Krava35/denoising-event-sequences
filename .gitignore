@@ -99,3 +99,6 @@ dmypy.json
 
 # Kaggle
 kaggle.json
+
+# Root-level base.yaml — canonical config lives in configs/base.yaml
+/base.yaml

@@ -1,0 +1,35 @@
+_dataset: "gender"
+_description: >
+  Gender prediction. Binary. Long sequences (median=324, p95=1089).
+  Amount is mostly negative (expenses, 80.9%) → sign*log1p required.
+  time_delta has heavy tail (mean/median >> 3x) → log1p_time=True.
+
+data:
+  max_seq_len: 512
+  min_seq_len: 5
+  event_type_col: "mcc_code"
+  timestamp_col: "tr_datetime"
+  target_col: "gender"
+  numerical_cols: ["amount"]
+  categorical_cols: ["tr_type", "term_id"]
+  group_col: "customer_id"
+  amount_transform: "sign_log1p"
+  amount_cols: ["amount"]
+  robust_scale_cols: ["amount"]
+  time_transform: "log1p"
+
+corruption:
+  time_noise:
+    corruption_prob: 0.30
+    min_std: 0.05
+    max_std: 0.30
+    sampling_level: "batch"
+  event_type:
+    use_transition_aware_replacement: false
+    transition_replace_prob: 0.00
+    random_replace_prob: 0.10
+
+training:
+  task: "binary"
+  num_classes: 2
+  main_metrics: ["roc_auc", "pr_auc", "macro_f1"]

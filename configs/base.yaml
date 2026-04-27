@@ -1,0 +1,134 @@
+project:
+  name: "denoising-event-sequences"
+  model_name: "DME-Encoder"
+  task: "sequence_classification"
+
+seed:
+  global_seed: 42
+
+data:
+  max_seq_len: 256
+  min_seq_len: 2
+  event_type_col: "event_type"
+  timestamp_col: "timestamp"
+  target_col: "target"
+  numerical_cols: []
+  categorical_cols: []
+  group_col: "entity_id"
+  truncation_pretrain: "sliding_window"   # random crop from full history each epoch
+  truncation_eval: "last_events"          # deterministic tail for eval/finetune
+  amount_transform: "robust_scaler"       # robust_scaler | sign_log1p | log1p
+  amount_cols: []
+  robust_scale_cols: []
+  train_ratio: 0.70
+  val_ratio: 0.15
+  test_ratio: 0.15
+
+# ── Corruption ────────────────────────────────────────────────────────────────
+# IMPORTANT: corruption is applied dynamically in the training loop.
+# Dataset returns clean batches only.
+corruption:
+  dynamic_in_training_loop: true
+
+  event_type:
+    # ~40% of valid (non-padding) positions are selected for prediction.
+    selected_prob: 0.40
+    # Of selected positions:
+    #   70% → [MASK_TYPE]
+    #   10% → random replacement  (was 0.02; +0.08 reallocated from transition)
+    #    5% → keep original (but predict anyway)
+    # transition-aware disabled by default: EDA shows entropy ~3.1–3.3 bits
+    # across all three datasets — transitions are near-uniform, no benefit.
+    # Ablation A3 is kept to confirm this empirically.
+    mask_prob: 0.28
+    transition_replace_prob: 0.00
+    random_replace_prob: 0.10
+    keep_predict_prob: 0.02
+    use_transition_aware_replacement: false
+
+  transition_matrix:
+    # Built ONCE from train split only. Never rebuilt online.
+    build_from: "train_split_only"
+    artifact_path: "data/processed/transition_matrix.npy"
+    metadata_path: "data/processed/transition_matrix_meta.json"
+    frozen_during_training: true
+    smoothing_alpha: 0.1
+    min_transition_count: 5
+    fallback: "frequency_aware"   # frequency_aware | random
+
+  # time_noise disabled by default: log1p_time=False for rosbank and age_group.
+  # Enabled via dataset override for gender (heavy tail, log1p_time=True).
+  time_noise:
+    corruption_prob: 0.00
+    min_std: 0.05
+    max_std: 0.30
+    sampling_level: "batch"   # batch | position
+
+  numerical_noise:
+    corruption_prob: 0.20
+    min_std: 0.03
+    max_std: 0.15
+    sampling_level: "batch"
+
+  categorical_features:
+    mask_prob: 0.15
+    random_replace_prob: 0.05
+
+  event_level_masking:
+    # Mask the entire event on a position (NOT insert/delete — length unchanged).
+    prob: 0.10
+
+# ── Model ─────────────────────────────────────────────────────────────────────
+model:
+  event_type_emb_dim: 64
+  cat_emb_dim: 32
+  num_projection_dim: 64
+  time_projection_dim: 64
+  hidden_dim: 256
+  num_layers: 4
+  num_heads: 8
+  dim_feedforward: 1024
+  dropout: 0.10
+  activation: "gelu"
+  backbone: "transformer"   # transformer | hybrid_ssm_transformer
+  max_seq_len: 256
+
+pooling:
+  type: "gated_attention"   # cls | mean | max | attention | gated_attention
+
+# ── Loss ──────────────────────────────────────────────────────────────────────
+loss:
+  lambda_event_type: 1.0
+  lambda_time: 1.0
+  lambda_num: 0.5
+  lambda_cat: 0.5
+  lambda_exist: 0.1
+
+loss_calibration:
+  enabled: true
+  warmup_steps: 1000
+  log_components: true
+  freeze_lambdas_after_warmup: true
+
+# ── Training ──────────────────────────────────────────────────────────────────
+training:
+  task: "binary"                          # binary | multiclass
+  main_metrics: ["roc_auc", "pr_auc"]
+  batch_size: 128
+  num_epochs_pretrain: 30
+  num_epochs_finetune: 20
+  lr: 0.0003
+  lr_encoder: 0.00003
+  weight_decay: 0.01
+  warmup_ratio: 0.05
+  gradient_clip_val: 1.0
+  mixed_precision: false
+  early_stopping_patience: 5
+  checkpoint_every_n_steps: 500
+  log_every_n_steps: 50
+
+# ── Low-label protocol ────────────────────────────────────────────────────────
+low_label_protocol:
+  label_fractions: [0.01, 0.05, 0.10, 0.25, 0.50, 1.00]
+  label_sampling_seeds: [42, 43, 44]
+  model_init_seeds: [42]

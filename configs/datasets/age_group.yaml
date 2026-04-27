@@ -1,0 +1,33 @@
+_dataset: "age_group"
+_description: >
+  Age group prediction. Multiclass (4 classes). Very long sequences
+  (median=863, p95=1108). Almost perfect class balance (ratio=1.02) —
+  class weights not needed. sliding_window in pretraining is critical:
+  without it most of each sequence is never seen.
+
+data:
+  max_seq_len: 512
+  min_seq_len: 5
+  event_type_col: "small_group"
+  timestamp_col: "trans_date"
+  target_col: "bins"
+  numerical_cols: ["amount_rur"]
+  categorical_cols: []
+  group_col: "client_id"
+  amount_transform: "robust_scaler"
+  amount_cols: ["amount_rur"]
+  robust_scale_cols: ["amount_rur"]
+  time_transform: "none"
+
+corruption:
+  time_noise:
+    corruption_prob: 0.00
+  event_type:
+    use_transition_aware_replacement: false
+    transition_replace_prob: 0.00
+    random_replace_prob: 0.10
+
+training:
+  task: "multiclass"
+  num_classes: 4
+  main_metrics: ["macro_f1", "balanced_accuracy", "accuracy"]

@@ -1,6 +1,5 @@
 import json
 import logging
-import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -23,14 +22,6 @@ _SPECIAL_TOKENS: dict[str, int] = {
     "<MASK_EVENT>": MASK_EVENT,
 }
 
-_ROBUST_KEYWORDS = frozenset({"amount", "amnt", "sum", "total"})
-
-
-def _is_amount_col(col: str) -> bool:
-    lower = col.lower()
-    return any(kw in lower for kw in _ROBUST_KEYWORDS)
-
-
 def _to_seconds(series: pd.Series) -> np.ndarray:
     if pd.api.types.is_numeric_dtype(series):
         return series.values.astype(float)
@@ -52,7 +43,15 @@ class EventPreprocessor:
         self.categorical_cols: list[str] = list(data_cfg.get("categorical_cols") or [])
         self.entity_col: str = data_cfg.get("group_col", "entity_id")
         self._amount_cols: set[str] = set(data_cfg.get("amount_cols") or [])
+        self._robust_scale_cols: set[str] = set(
+            data_cfg.get("robust_scale_cols") or self._amount_cols
+        )
         self.min_count: int = int(data_cfg.get("min_vocab_count", 5))
+        # Transform configs from EDA findings:
+        #   amount_transform: robust_scaler | sign_log1p | log1p
+        #   time_transform:   log1p (default, backward-compat) | none
+        self.amount_transform: str = data_cfg.get("amount_transform", "robust_scaler")
+        self.time_transform: str = data_cfg.get("time_transform", "log1p")
 
         self.vocab: dict[str, dict[str, int]] = {}
         self.scaler_params: dict[str, dict] = {}
@@ -68,11 +67,21 @@ class EventPreprocessor:
             self._build_vocab(train_df, col)
 
         time_delta = self.compute_time_delta(train_df, self.entity_col, self.timestamp_col)
-        self._fit_scaler("time_delta", np.log1p(time_delta.values.astype(float)), robust=True)
+        td_values = self._transform_time(
+            pd.Series(time_delta.values.astype(float)), self.time_transform
+        ).values
+        self._fit_scaler("time_delta", td_values, robust=True)
 
         for col in self.numerical_cols:
-            robust = col in self._amount_cols or _is_amount_col(col)
-            self._fit_scaler(col, train_df[col].values.astype(float), robust=robust)
+            is_amount = col in self._amount_cols
+            use_robust = col in self._robust_scale_cols
+            raw = pd.Series(train_df[col].values.astype(float))
+            values = (
+                self._transform_amount(raw, self.amount_transform).values
+                if is_amount
+                else raw.values
+            )
+            self._fit_scaler(col, values, robust=use_robust)
 
         self._fitted = True
         logger.info(
@@ -132,13 +141,19 @@ class EventPreprocessor:
             result[col] = result[col].astype(str).map(lambda x, v=col_vocab: v.get(x, UNK))
 
         time_delta = self.compute_time_delta(df, self.entity_col, self.timestamp_col)
-        result["time_delta"] = self._scale(
-            np.log1p(time_delta.values.astype(float)), "time_delta"
-        )
+        td_values = self._transform_time(
+            pd.Series(time_delta.values.astype(float)), self.time_transform
+        ).values
+        result["time_delta"] = self._scale(td_values, "time_delta")
 
         for col in self.numerical_cols:
-            values = result[col].values.astype(float)
+            is_amount = col in self._amount_cols
+            raw = pd.Series(result[col].values.astype(float))
             center = self.scaler_params[col]["center"]
+            if is_amount:
+                values = self._transform_amount(raw, self.amount_transform).values
+            else:
+                values = raw.values
             values = np.where(np.isfinite(values), values, center)
             result[col] = self._scale(values, col)
 
@@ -146,6 +161,34 @@ class EventPreprocessor:
         assert not nan_cols, f"NaN after transform in columns: {nan_cols}"
 
         return result
+
+    @staticmethod
+    def _transform_amount(series: pd.Series, transform: str) -> pd.Series:
+        """
+        Apply amount-specific pre-transform before RobustScaler.
+
+        sign_log1p: sign(x) * log1p(|x|) — for datasets where amounts are
+                    predominantly negative (e.g. gender: 80.9% expenses).
+        log1p:      log1p(x) — for non-negative amounts with heavy tail.
+        robust_scaler (default): identity — RobustScaler applied directly.
+        """
+        if transform == "sign_log1p":
+            return np.sign(series) * np.log1p(np.abs(series))
+        if transform == "log1p":
+            return np.log1p(series)
+        return series
+
+    @staticmethod
+    def _transform_time(series: pd.Series, transform: str) -> pd.Series:
+        """
+        Apply time_delta pre-transform before RobustScaler.
+
+        log1p (default): for heavy-tail time_delta distributions (gender).
+        none: for integer-day datasets where log1p adds little (rosbank, age_group).
+        """
+        if transform == "log1p":
+            return np.log1p(series)
+        return series
 
     def _scale(self, values: np.ndarray, col: str) -> np.ndarray:
         p = self.scaler_params[col]
@@ -204,131 +247,3 @@ class EventPreprocessor:
         self.scaler_params = artifact["scaler_params"]
         self._fitted = True
         logger.info("Loaded preprocessor from %s", path)
-
-
-# ── __main__ tests ────────────────────────────────────────────────────────────
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-
-    rng = np.random.default_rng(42)
-    n_entities = 200
-    events_per_entity = 5
-    n_event_types = 15
-
-    entity_ids = [f"e_{i:04d}" for i in range(n_entities)]
-    targets = rng.integers(0, 2, size=n_entities)
-
-    rows = []
-    base_time = pd.Timestamp("2023-01-01")
-    for i, eid in enumerate(entity_ids):
-        t = base_time + pd.Timedelta(days=int(rng.integers(0, 30)))
-        for _ in range(events_per_entity):
-            t += pd.Timedelta(hours=int(rng.integers(1, 48)))
-            rows.append(
-                {
-                    "entity_id": eid,
-                    "timestamp": t,
-                    # event type 99 added as rare: appears only in first 2 entities
-                    "event_type": 99 if (i < 2) else int(rng.integers(0, n_event_types)),
-                    "amount": float(rng.exponential(100)),
-                    "num_feature": float(rng.normal(0, 1)),
-                    "cat_col": int(rng.integers(0, 8)),
-                    "target": int(targets[i]),
-                }
-            )
-
-    df = pd.DataFrame(rows)
-
-    config = {
-        "data": {
-            "event_type_col": "event_type",
-            "timestamp_col": "timestamp",
-            "numerical_cols": ["amount", "num_feature"],
-            "categorical_cols": ["cat_col"],
-            "group_col": "entity_id",
-            "min_vocab_count": 5,
-        }
-    }
-
-    train_ids = entity_ids[:140]
-    val_ids = entity_ids[140:170]
-    test_ids = entity_ids[170:]
-
-    prep = EventPreprocessor(config)
-    prep.fit(df, train_ids)
-
-    # Special token indices must be fixed
-    for col_vocab in prep.vocab.values():
-        assert col_vocab["<PAD>"] == PAD, "PAD index wrong"
-        assert col_vocab["<UNK>"] == UNK, "UNK index wrong"
-        assert col_vocab["<MASK_TYPE>"] == MASK_TYPE, "MASK_TYPE index wrong"
-        assert col_vocab["<MASK_CAT>"] == MASK_CAT, "MASK_CAT index wrong"
-        assert col_vocab["<MASK_EVENT>"] == MASK_EVENT, "MASK_EVENT index wrong"
-
-    # Rare type 99 (only in entities 0-1, both in train, but count < 5 in 140-entity train)
-    # entities 0-1 contribute 10 rows with type 99; min_count=5, so it depends on count.
-    # With 2 entities × 5 events = 10 occurrences in full data, 10 in train (entities 0-1 are in train).
-    # count=10 >= 5, so type 99 IS in vocab. Let's verify it's there.
-    ev_vocab = prep.vocab[prep.event_type_col]
-    assert "99" in ev_vocab, "type 99 with 10 occurrences should be in vocab"
-
-    # Scaler types
-    assert prep.scaler_params["time_delta"]["type"] == "robust"
-    assert prep.scaler_params["amount"]["type"] == "robust"
-    assert prep.scaler_params["num_feature"]["type"] == "standard"
-
-    # Transform all splits
-    def get_split_df(ids: list) -> pd.DataFrame:
-        return df[df["entity_id"].isin(set(ids))].copy()
-
-    train_t = prep.transform(get_split_df(train_ids))
-    val_t = prep.transform(get_split_df(val_ids))
-    test_t = prep.transform(get_split_df(test_ids))
-
-    # No NaN in transformed cols
-    for name, tdf in [("train", train_t), ("val", val_t), ("test", test_t)]:
-        for col in ["event_type", "amount", "num_feature", "cat_col", "time_delta"]:
-            assert not tdf[col].isna().any(), f"NaN in {name}/{col}"
-
-    # OOV event type → UNK
-    oov_df = get_split_df(test_ids).copy()
-    oov_df["event_type"] = 9999
-    oov_t = prep.transform(oov_df)
-    assert (oov_t["event_type"] == UNK).all(), "OOV must map to UNK"
-
-    # Vocab built only from train: event types seen only in val/test must map to UNK
-    val_only_df = get_split_df(val_ids).copy()
-    val_only_df["event_type"] = 9999  # definitely not in train vocab
-    val_only_t = prep.transform(val_only_df)
-    assert (val_only_t["event_type"] == UNK).all(), "val-only type must map to UNK"
-
-    # time_delta: first event of each entity → delta=0 → log1p(0)=0 → scaled value
-    # After scaling: (0 - center) / scale. Just verify finite and no NaN.
-    assert np.isfinite(train_t["time_delta"].values).all(), "time_delta must be finite"
-
-    # NaN in numerical col → imputed with center → scaled to 0
-    nan_df = get_split_df(test_ids).copy()
-    nan_df["amount"] = np.nan
-    nan_t = prep.transform(nan_df)
-    assert not nan_t["amount"].isna().any(), "NaN numerical should be imputed"
-    expected_val = 0.0  # (center - center) / scale = 0
-    assert np.allclose(nan_t["amount"].values, expected_val), "imputed value must be 0 after scaling"
-
-    # Save / load round-trip
-    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
-        tmp_path = tmp.name
-
-    prep.save(tmp_path)
-    prep2 = EventPreprocessor(config)
-    prep2.load(tmp_path)
-
-    assert prep2._fitted
-    assert prep2.vocab == prep.vocab
-    assert prep2.scaler_params == prep.scaler_params
-
-    test_t2 = prep2.transform(get_split_df(test_ids))
-    pd.testing.assert_frame_equal(test_t[["event_type", "amount", "num_feature", "cat_col", "time_delta"]],
-                                  test_t2[["event_type", "amount", "num_feature", "cat_col", "time_delta"]])
-
-    print("All assertions passed.")

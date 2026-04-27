@@ -193,6 +193,46 @@ def _print_dry_run_stats(df: pd.DataFrame, config: dict) -> None:
     print()
 
 
+# ── Synthetic data generator ──────────────────────────────────────────────────
+
+def _make_synthetic_df(config: dict) -> pd.DataFrame:
+    """Generate a minimal synthetic DataFrame for validation / dry-run."""
+    import numpy as np
+    rng = np.random.default_rng(42)
+    data_cfg = config.get("data", {})
+    entity_col = data_cfg.get("group_col", "entity_id")
+    timestamp_col = data_cfg.get("timestamp_col", "timestamp")
+    event_type_col = data_cfg.get("event_type_col", "event_type")
+    target_col = data_cfg.get("target_col", "target")
+    num_cols = list(data_cfg.get("numerical_cols") or [])
+    cat_cols = list(data_cfg.get("categorical_cols") or [])
+
+    n_entities = 30
+    events_per = 20
+    entity_ids = [f"synth_{i:04d}" for i in range(n_entities)]
+    targets = rng.integers(0, 2, size=n_entities)
+    base_time = pd.Timestamp("2023-01-01")
+    rows = []
+    for i, eid in enumerate(entity_ids):
+        t = base_time
+        for _ in range(events_per):
+            t += pd.Timedelta(hours=int(rng.integers(1, 48)))
+            row: dict = {
+                entity_col: eid,
+                timestamp_col: t,
+                event_type_col: int(rng.integers(0, 10)),
+                target_col: int(targets[i]),
+            }
+            for c in num_cols:
+                row[c] = float(rng.normal(0, 1))
+            for c in cat_cols:
+                row[c] = int(rng.integers(0, 5))
+            rows.append(row)
+    df = pd.DataFrame(rows)
+    logger.info("Generated synthetic DataFrame: %d rows, %d entities", len(df), n_entities)
+    return df
+
+
 # ── Main pipeline ─────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -229,7 +269,10 @@ def main() -> None:
     target_col: str = data_cfg["target_col"]
 
     # ── 1. Load ───────────────────────────────────────────────────────────────
-    df = _load_data(args.input)
+    if args.input == "synthetic":
+        df = _make_synthetic_df(config)
+    else:
+        df = _load_data(args.input)
 
     # ── 2. Validate ───────────────────────────────────────────────────────────
     _validate(df, config)

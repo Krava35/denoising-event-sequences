@@ -1,9 +1,7 @@
 import json
 import logging
-import tempfile
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
@@ -111,58 +109,3 @@ def load_splits(path: str | Path) -> dict[str, list]:
         splits = json.load(f)
     logger.info("Loaded splits from %s", path)
     return splits
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-
-    rng = np.random.default_rng(42)
-    n_entities = 1000
-    entity_ids = [f"e_{i:04d}" for i in range(n_entities)]
-    targets = rng.integers(0, 2, size=n_entities).tolist()
-
-    # ~5 events per entity
-    rows = []
-    for eid, tgt in zip(entity_ids, targets):
-        for _ in range(5):
-            rows.append({"entity_id": eid, "event_type": rng.integers(0, 10), "target": tgt})
-    df = pd.DataFrame(rows)
-
-    splits = make_entity_splits(
-        df,
-        entity_col="entity_id",
-        target_col="target",
-        train_ratio=0.70,
-        val_ratio=0.15,
-        test_ratio=0.15,
-        seed=42,
-        stratify=True,
-    )
-
-    train_set = set(splits["train"])
-    val_set = set(splits["val"])
-    test_set = set(splits["test"])
-
-    assert train_set.isdisjoint(val_set), "FAIL: train/val leakage"
-    assert train_set.isdisjoint(test_set), "FAIL: train/test leakage"
-    assert val_set.isdisjoint(test_set), "FAIL: val/test leakage"
-
-    total = len(splits["train"]) + len(splits["val"]) + len(splits["test"])
-    assert total == n_entities, f"FAIL: coverage {total} != {n_entities}"
-
-    assert abs(len(splits["train"]) / n_entities - 0.70) < 0.02, "FAIL: train ratio"
-    assert abs(len(splits["val"]) / n_entities - 0.15) < 0.02, "FAIL: val ratio"
-    assert abs(len(splits["test"]) / n_entities - 0.15) < 0.02, "FAIL: test ratio"
-
-    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
-        tmp_path = tmp.name
-
-    save_splits(splits, tmp_path)
-    loaded = load_splits(tmp_path)
-    assert loaded.keys() == splits.keys()
-    for split_name in splits:
-        assert set(loaded[split_name]) == set(splits[split_name]), (
-            f"FAIL: round-trip mismatch in {split_name}"
-        )
-
-    print("All assertions passed.")

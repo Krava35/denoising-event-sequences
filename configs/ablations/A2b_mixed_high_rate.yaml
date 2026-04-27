@@ -1,0 +1,29 @@
+# A2b: Mixed-type corruption at HIGH rate (full base rates).
+# Adds time, numerical, and categorical corruption to A1.
+# No transition-aware replacement. No event-level masking.
+# A3 builds on this config by enabling transition-aware replacement.
+
+corruption:
+  event_type:
+    use_transition_aware_replacement: false
+    transition_replace_prob: 0.00
+    random_replace_prob: 0.10
+
+  time_noise:
+    corruption_prob: 0.30
+    min_std: 0.05
+    max_std: 0.30
+    sampling_level: "batch"
+
+  numerical_noise:
+    corruption_prob: 0.20
+    min_std: 0.03
+    max_std: 0.15
+    sampling_level: "batch"
+
+  categorical_features:
+    mask_prob: 0.15
+    random_replace_prob: 0.05
+
+  event_level_masking:
+    prob: 0.00
