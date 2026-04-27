@@ -714,7 +714,7 @@ model_init_seeds отвечают за random initialization модели.
 Для каждой label fraction все методы должны использовать одинаковые labeled subsets.
 ```
 
-Итоговая таблица:
+<!-- Итоговая таблица:
 
 | Label fraction | Supervised baseline | DME pretraining + fine-tuning | Gain |
 |---:|---:|---:|---:|
@@ -723,7 +723,7 @@ model_init_seeds отвечают за random initialization модели.
 | 10% | TBD | TBD | TBD |
 | 25% | TBD | TBD | TBD |
 | 50% | TBD | TBD | TBD |
-| 100% | TBD | TBD | TBD |
+| 100% | TBD | TBD | TBD | -->
 
 ---
 
