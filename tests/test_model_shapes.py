@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 import torch
+import torch.nn as nn
 
 from src.models.dme_encoder import DMEEncoder
 from src.models.pooling import get_pooling
@@ -80,6 +81,47 @@ def test_tokenizer_output_shape(batch: dict) -> None:
     )
     assert out.shape == (B, L, H)
     assert out.isfinite().all(), "tokenizer output contains NaN/Inf"
+
+
+def test_tokenizer_projects_preprocessed_time_delta_without_log_or_clamp(batch: dict) -> None:
+    class CaptureTimeProjection(nn.Module):
+        def __init__(self, out_dim: int) -> None:
+            super().__init__()
+            self.out_dim = out_dim
+            self.seen: torch.Tensor | None = None
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            self.seen = x.detach().clone()
+            return torch.zeros(*x.shape[:-1], self.out_dim, device=x.device, dtype=x.dtype)
+
+    tok = MixedEventTokenizer(
+        event_type_vocab_size=20,
+        event_type_emb_dim=32,
+        cat_vocab_sizes=[8, 6],
+        cat_emb_dim=16,
+        num_num_features=3,
+        num_projection_dim=32,
+        time_projection_dim=32,
+        hidden_dim=H,
+        max_seq_len=64,
+        dropout=0.0,
+    )
+    capture = CaptureTimeProjection(out_dim=32)
+    tok.time_projection = capture
+
+    scaled_time = torch.linspace(-2.5, 2.5, B * L).reshape(B, L)
+    out = tok(
+        event_type=batch["event_type"],
+        time_delta=scaled_time,
+        num_features=batch["num_features"],
+        cat_features=batch["cat_features"],
+        attention_mask=batch["attention_mask"],
+    )
+
+    assert out.shape == (B, L, H)
+    assert out.isfinite().all(), "tokenizer output contains NaN/Inf"
+    assert capture.seen is not None
+    assert torch.equal(capture.seen.squeeze(-1), scaled_time)
 
 
 # ── Encoder ───────────────────────────────────────────────────────────────────

@@ -76,6 +76,7 @@ def evaluate_robustness(
             config=scaled_cfg,
             transition_matrix=corruption_pipeline._tm,
             vocab_sizes=corruption_pipeline._vocab_sizes,
+            time_transform=corruption_pipeline._time_transform,
         )
 
         all_probs: list[np.ndarray] = []

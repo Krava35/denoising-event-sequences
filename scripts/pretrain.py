@@ -94,6 +94,7 @@ def build_corruption_pipeline(config: dict, vocab_info: dict, transition_matrix)
             "event_type": vocab_info["event_type_vocab_size"],
             "cat_features": vocab_info["cat_vocab_sizes"],
         },
+        time_transform=config.get("data", {}).get("time_transform", "log1p"),
     )
 
 

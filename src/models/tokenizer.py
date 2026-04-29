@@ -62,9 +62,9 @@ class MixedEventTokenizer(nn.Module):
         # [B, L, event_type_emb_dim]
         event_type_emb = self.event_type_embedding(event_type)
 
-        # [B, L, 1] → [B, L, time_projection_dim]
-        log_time = torch.log1p(time_delta.clamp(min=0)).unsqueeze(-1)
-        time_emb = self.time_projection(log_time)
+        # time_delta is already transformed and scaled by EventPreprocessor.
+        # Do not clamp/log it again: robust-scaled values can be negative.
+        time_emb = self.time_projection(time_delta.unsqueeze(-1))
 
         # [1, L, hidden_dim] — добавляется после проекции
         positions = torch.arange(L, device=event_type.device)

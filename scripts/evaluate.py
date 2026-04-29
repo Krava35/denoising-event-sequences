@@ -148,6 +148,7 @@ def main() -> None:
         config=corruption_cfg,
         transition_matrix=transition_matrix,
         vocab_sizes=vocab_sizes,
+        time_transform=config.get("data", {}).get("time_transform", "log1p"),
     )
 
     # ── Classification evaluation ─────────────────────────────────────────────
