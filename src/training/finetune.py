@@ -20,6 +20,7 @@ from torchmetrics.classification import (
 )
 
 from src.models.dme_encoder import DMEEncoder
+from src.training.losses import compute_forecast_loss
 from src.training.optim import build_finetune_optimizer, get_linear_warmup_scheduler
 from src.utils.logging import MetricsLogger
 
@@ -156,6 +157,9 @@ def finetune(
     log_every: int = training_cfg.get("log_every_n_steps", 50)
     patience: int = training_cfg.get("early_stopping_patience", 5)
     mixed_precision: bool = training_cfg.get("mixed_precision", False)
+    forecast_cfg = config.get("forecasting", {})
+    forecast_aux_enabled = bool(forecast_cfg.get("finetune_aux_enabled", False))
+    forecast_aux_weight = float(forecast_cfg.get("finetune_aux_weight", 0.05))
 
     # Determine num_classes from classifier head output dimension
     num_classes: int = model.classifier.classifier[-1].out_features
@@ -193,6 +197,12 @@ def finetune(
             with torch.autocast(device_type=device.type, enabled=use_amp):
                 outputs = model(batch, mode="finetune")
                 loss = F.cross_entropy(outputs["logits"], labels)
+                if forecast_aux_enabled and "forecast_targets" in batch:
+                    forecast_outputs = model(batch, mode="forecast")
+                    forecast_loss = compute_forecast_loss(
+                        forecast_outputs, batch["forecast_targets"], config
+                    )
+                    loss = loss + forecast_aux_weight * forecast_loss["total"]
 
             if use_scaler:
                 scaler.scale(loss).backward()

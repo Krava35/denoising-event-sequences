@@ -5,6 +5,31 @@ import torch
 logger = logging.getLogger(__name__)
 
 
+def _collate_forecast_targets(batch: list[dict]) -> dict:
+    targets = [item["forecast_targets"] for item in batch]
+    result: dict = {
+        "future_event_type_profile": torch.stack(
+            [target["future_event_type_profile"] for target in targets]
+        ),
+        "future_count_bucket": torch.stack(
+            [target["future_count_bucket"] for target in targets]
+        ).long(),
+        "future_amount_stats": torch.stack(
+            [target["future_amount_stats"] for target in targets]
+        ),
+        "future_gap_bucket": torch.stack(
+            [target["future_gap_bucket"] for target in targets]
+        ).long(),
+    }
+
+    first_cat_profiles = targets[0].get("future_cat_profiles", [])
+    result["future_cat_profiles"] = [
+        torch.stack([target["future_cat_profiles"][j] for target in targets])
+        for j in range(len(first_cat_profiles))
+    ]
+    return result
+
+
 def collate_fn(batch: list[dict]) -> dict:
     B = len(batch)
     max_L = max(item["event_type"].shape[0] for item in batch)
@@ -43,7 +68,7 @@ def collate_fn(batch: list[dict]) -> dict:
     if labels.shape != (B,):
         raise ValueError(f"labels shape {labels.shape} != ({B},)")
 
-    return {
+    result = {
         "event_type": event_type,
         "time_delta": time_delta,
         "num_features": num_features,
@@ -52,3 +77,8 @@ def collate_fn(batch: list[dict]) -> dict:
         "label": labels,
         "entity_id": entity_ids,
     }
+
+    if "forecast_targets" in batch[0]:
+        result["forecast_targets"] = _collate_forecast_targets(batch)
+
+    return result

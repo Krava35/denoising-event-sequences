@@ -72,3 +72,56 @@ class ClassificationHead(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: [B, H] (после pooling) → [B, num_classes]
         return self.classifier(x)
+
+
+class FutureEventTypeProfileHead(nn.Module):
+    def __init__(self, input_dim: int, vocab_size: int) -> None:
+        super().__init__()
+        self.head = nn.Sequential(
+            nn.Linear(input_dim, input_dim),
+            nn.GELU(),
+            nn.Linear(input_dim, vocab_size),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.head(x)
+
+
+class FutureCountBucketHead(nn.Module):
+    def __init__(self, input_dim: int, num_buckets: int) -> None:
+        super().__init__()
+        self.linear = nn.Linear(input_dim, num_buckets)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.linear(x)
+
+
+class FutureAmountStatsHead(nn.Module):
+    def __init__(self, input_dim: int) -> None:
+        super().__init__()
+        self.head = nn.Sequential(
+            nn.Linear(input_dim, input_dim),
+            nn.GELU(),
+            nn.Linear(input_dim, 4),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.head(x)
+
+
+class FutureGapBucketHead(nn.Module):
+    def __init__(self, input_dim: int, num_buckets: int) -> None:
+        super().__init__()
+        self.linear = nn.Linear(input_dim, num_buckets)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.linear(x)
+
+
+class FutureCategoricalProfileHead(nn.Module):
+    def __init__(self, input_dim: int, vocab_sizes: list[int]) -> None:
+        super().__init__()
+        self.heads = nn.ModuleList([nn.Linear(input_dim, vocab_size) for vocab_size in vocab_sizes])
+
+    def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
+        return [head(x) for head in self.heads]

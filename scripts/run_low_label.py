@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.data.collate import collate_fn
 from src.data.dataset import EventSequenceDataset
+from src.data.forecasting import get_num_feature_dim
 from src.data.splits import load_splits
 from src.evaluation.classification import compute_classification_metrics
 from src.models.dme_encoder import DMEEncoder
@@ -66,7 +67,7 @@ def _build_vocab_info(preprocessor, config: dict) -> dict:
         "cat_vocab_sizes": [
             len(preprocessor.vocab.get(col, {})) for col in preprocessor.categorical_cols
         ],
-        "num_num_features": len(preprocessor.numerical_cols),
+        "num_num_features": get_num_feature_dim(preprocessor, config),
         "num_classes": int(config.get("training", {}).get("num_classes", 2)),
     }
 

@@ -1,12 +1,4 @@
-"""DME-Encoder denoising pretraining.
-
-Expected --data-dir layout:
-  events.parquet            — raw (pre-transform) event data fed to EventSequenceDataset
-  splits.json               — {"train": [...], "val": [...], "test": [...]}
-  preprocessor.pkl          — pickled EventPreprocessor fitted on train split
-  transition_matrix.npy     — optional, loaded when use_transition_aware_replacement=true
-  transition_matrix_meta.json
-"""
+"""Hybrid denoising + forecast pretraining for DME-Encoder."""
 from __future__ import annotations
 
 import argparse
@@ -26,10 +18,15 @@ from src.corruption.pipeline import CorruptionPipeline
 from src.corruption.transition_matrix import TransitionMatrix
 from src.data.collate import collate_fn
 from src.data.dataset import EventSequenceDataset
-from src.data.forecasting import get_num_feature_dim
+from src.data.forecasting import (
+    build_forecast_stats,
+    get_num_feature_dim,
+    load_forecast_stats,
+    save_forecast_stats,
+)
 from src.data.splits import load_splits
 from src.models.dme_encoder import DMEEncoder
-from src.training.pretrain import pretrain
+from src.training.forecast_pretrain import forecast_pretrain
 from src.utils.config import load_experiment_config, save_config
 from src.utils.logging import MetricsLogger
 from src.utils.seed import get_device, set_seed
@@ -42,17 +39,16 @@ logger = logging.getLogger(__name__)
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="DME-Encoder pretraining")
+    p = argparse.ArgumentParser(description="DME-Encoder forecast pretraining")
     p.add_argument("--config", default="configs/base.yaml", help="Base config path")
     p.add_argument("--dataset", default=None, help="Dataset config override")
     p.add_argument("--ablation", default=None, help="Ablation config override")
     p.add_argument("--data-dir", required=True, help="Directory with events.parquet, splits.json, preprocessor.pkl")
     p.add_argument("--output-dir", default="outputs", help="Root output directory")
     p.add_argument("--resume", default=None, help="Checkpoint path to restore model weights from")
+    p.add_argument("--forecast-stats", default=None, help="Optional existing forecast_stats.json")
     return p.parse_args()
 
-
-# ── Shared helpers ────────────────────────────────────────────────────────────
 
 def load_preprocessor(data_dir: Path):
     pkl = data_dir / "preprocessor.pkl"
@@ -99,8 +95,6 @@ def build_corruption_pipeline(config: dict, vocab_info: dict, transition_matrix)
     )
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
-
 def main() -> None:
     args = parse_args()
 
@@ -109,6 +103,10 @@ def main() -> None:
         dataset_path=args.dataset,
         ablation_path=args.ablation,
     )
+    config = {
+        **config,
+        "forecasting": {**config.get("forecasting", {}), "enabled": True},
+    }
 
     seed = config.get("seed", {}).get("global_seed", 42)
     set_seed(seed)
@@ -118,56 +116,77 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     checkpoints_dir = output_dir / "checkpoints"
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
-    save_config(config, str(checkpoints_dir / "pretrain_config.yaml"))
+    save_config(config, str(checkpoints_dir / "forecast_pretrain_config.yaml"))
 
-    # ── Load data artifacts ───────────────────────────────────────────────────
     preprocessor = load_preprocessor(data_dir)
     splits = load_splits(data_dir / "splits.json")
     df_events = pd.read_parquet(data_dir / "events.parquet")
     logger.info(
         "Data loaded | train=%d val=%d test=%d entities | rows=%d",
-        len(splits["train"]), len(splits["val"]), len(splits.get("test", [])),
+        len(splits["train"]),
+        len(splits["val"]),
+        len(splits.get("test", [])),
         len(df_events),
     )
 
-    vocab_info = build_vocab_info(preprocessor, config)
-    logger.info("Vocab info: %s", {k: v for k, v in vocab_info.items() if k != "cat_vocab_sizes"})
+    if args.forecast_stats:
+        forecast_stats = load_forecast_stats(args.forecast_stats)
+        stats_path = Path(args.forecast_stats)
+    else:
+        forecast_stats = build_forecast_stats(df_events, splits["train"], preprocessor, config)
+        stats_path = checkpoints_dir / "forecast_stats.json"
+        save_forecast_stats(forecast_stats, stats_path)
+    logger.info("Forecast stats: %s", stats_path)
 
-    # ── Datasets and loaders ──────────────────────────────────────────────────
+    vocab_info = build_vocab_info(preprocessor, config)
     batch_size = int(config.get("training", {}).get("batch_size", 128))
 
     train_loader = DataLoader(
-        EventSequenceDataset(df_events, splits["train"], preprocessor, config, mode="pretrain"),
-        batch_size=batch_size, shuffle=True, collate_fn=collate_fn, num_workers=0,
+        EventSequenceDataset(
+            df_events,
+            splits["train"],
+            preprocessor,
+            config,
+            mode="forecast",
+            forecast_stats=forecast_stats,
+        ),
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=collate_fn,
+        num_workers=0,
     )
     val_loader = DataLoader(
-        EventSequenceDataset(df_events, splits["val"], preprocessor, config, mode="pretrain"),
-        batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=0,
+        EventSequenceDataset(
+            df_events,
+            splits["val"],
+            preprocessor,
+            config,
+            mode="forecast",
+            forecast_stats=forecast_stats,
+        ),
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collate_fn,
+        num_workers=0,
     )
     logger.info("DataLoaders: %d train batches | %d val batches", len(train_loader), len(val_loader))
 
-    # ── Model ─────────────────────────────────────────────────────────────────
     model = DMEEncoder(config, vocab_info)
-    param_counts = model.count_parameters()
-    logger.info("Model parameters: total=%d", param_counts["total"])
-
     if args.resume:
         ckpt = torch.load(args.resume, map_location="cpu", weights_only=False)
         model.load_state_dict(ckpt["model_state_dict"])
         logger.info("Restored model weights from %s (epoch=%d)", args.resume, ckpt.get("epoch", -1))
 
-    # ── Corruption pipeline ───────────────────────────────────────────────────
     transition_matrix = load_transition_matrix(data_dir, config)
     corruption_pipeline = build_corruption_pipeline(config, vocab_info, transition_matrix)
 
-    # ── Train ─────────────────────────────────────────────────────────────────
     exp_name = Path(args.config).stem
     if args.dataset:
         exp_name = f"{exp_name}_{Path(args.dataset).stem}"
-    ml = MetricsLogger(str(output_dir / "logs"), f"{exp_name}_pretrain")
+    ml = MetricsLogger(str(output_dir / "logs"), f"{exp_name}_forecast_pretrain")
     ml.log_config(config)
 
-    best_ckpt = pretrain(
+    best_ckpt = forecast_pretrain(
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
@@ -178,16 +197,19 @@ def main() -> None:
         logger=ml,
         vocab_info=vocab_info,
     )
-    logger.info("Best pretrain checkpoint: %s", best_ckpt)
+    logger.info("Best forecast pretrain checkpoint: %s", best_ckpt)
 
-    # ── Save final metrics summary ────────────────────────────────────────────
     metrics_dir = output_dir / "metrics"
     metrics_dir.mkdir(parents=True, exist_ok=True)
-    summary = {"best_checkpoint": str(best_ckpt), "vocab_info": vocab_info}
-    summary_path = metrics_dir / f"{exp_name}_pretrain_summary.json"
+    summary = {
+        "best_checkpoint": str(best_ckpt),
+        "forecast_stats": str(stats_path),
+        "vocab_info": vocab_info,
+    }
+    summary_path = metrics_dir / f"{exp_name}_forecast_pretrain_summary.json"
     with summary_path.open("w") as f:
         json.dump(summary, f, indent=2)
-    logger.info("Pretrain summary saved to %s", summary_path)
+    logger.info("Forecast pretrain summary saved to %s", summary_path)
 
 
 if __name__ == "__main__":
