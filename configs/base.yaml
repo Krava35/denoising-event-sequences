@@ -109,7 +109,7 @@ forecasting:
   event_type_target_mode: "log_future_global_ratio"
   count_num_buckets: 6
   gap_num_buckets: 6
-  alpha_denoising: 0.2
+  alpha_forecast: 0.2
   lambda_event_type_profile: 1.0
   lambda_count: 0.5
   lambda_amount: 0.5

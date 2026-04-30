@@ -5,6 +5,7 @@ import argparse
 import json
 import logging
 import pickle
+import shutil
 import sys
 from pathlib import Path
 
@@ -23,10 +24,12 @@ from src.data.forecasting import (
     get_num_feature_dim,
     load_forecast_stats,
     save_forecast_stats,
+    scenario_from_outputs,
+    scenario_from_targets,
 )
 from src.data.splits import load_splits
 from src.models.dme_encoder import DMEEncoder
-from src.training.forecast_pretrain import forecast_pretrain
+from src.training.forecast_pretrain import evaluate_forecast_quality, forecast_pretrain
 from src.utils.config import load_experiment_config, save_config
 from src.utils.logging import MetricsLogger
 from src.utils.seed import get_device, set_seed
@@ -93,6 +96,75 @@ def build_corruption_pipeline(config: dict, vocab_info: dict, transition_matrix)
         },
         time_transform=config.get("data", {}).get("time_transform", "log1p"),
     )
+
+
+def _batch_to_device(value, device: torch.device):
+    if isinstance(value, torch.Tensor):
+        return value.to(device)
+    if isinstance(value, dict):
+        return {k: _batch_to_device(v, device) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_batch_to_device(v, device) for v in value]
+    return value
+
+
+def _slice_outputs(outputs: dict, index: int) -> dict:
+    sliced = {}
+    for key, value in outputs.items():
+        if isinstance(value, torch.Tensor):
+            sliced[key] = value[index : index + 1]
+        elif isinstance(value, list):
+            sliced[key] = [item[index : index + 1] for item in value]
+        else:
+            sliced[key] = value
+    return sliced
+
+
+def save_scenario_examples(
+    model: DMEEncoder,
+    val_loader: DataLoader,
+    forecast_stats: dict,
+    vocab: dict,
+    output_path: Path,
+    device: torch.device,
+    *,
+    limit: int = 20,
+    top_k: int = 5,
+) -> None:
+    model.eval()
+    examples: list[dict] = []
+    with torch.no_grad():
+        for batch in val_loader:
+            batch_on_device = _batch_to_device(batch, device)
+            outputs = model(batch_on_device, mode="forecast")
+            for i, entity_id in enumerate(batch["entity_id"]):
+                examples.append(
+                    {
+                        "entity_id": entity_id,
+                        "predicted_scenario": scenario_from_outputs(
+                            _slice_outputs(outputs, i),
+                            forecast_stats,
+                            vocab,
+                            top_k=top_k,
+                        ),
+                        "true_future_summary": scenario_from_targets(
+                            batch_on_device["forecast_targets"],
+                            forecast_stats,
+                            vocab,
+                            index=i,
+                            top_k=top_k,
+                        ),
+                    }
+                )
+                if len(examples) >= limit:
+                    break
+            if len(examples) >= limit:
+                break
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w") as f:
+        json.dump(examples, f, indent=2, ensure_ascii=False)
+    logger.info("Scenario examples saved to %s", output_path)
 
 
 def main() -> None:
@@ -201,9 +273,44 @@ def main() -> None:
 
     metrics_dir = output_dir / "metrics"
     metrics_dir.mkdir(parents=True, exist_ok=True)
+
+    metrics_jsonl_path = metrics_dir / "forecast_pretrain_metrics.jsonl"
+    if ml.metrics_path.exists():
+        shutil.copyfile(ml.metrics_path, metrics_jsonl_path)
+        logger.info("Forecast pretrain metrics copied to %s", metrics_jsonl_path)
+
+    best_state = torch.load(best_ckpt, map_location="cpu", weights_only=False)
+    model.load_state_dict(best_state["model_state_dict"])
+    forecast_eval_metrics = evaluate_forecast_quality(
+        model=model,
+        val_loader=val_loader,
+        config=config,
+        device=device,
+        forecast_stats=forecast_stats,
+    )
+    forecast_eval_path = metrics_dir / "forecast_eval_metrics.json"
+    with forecast_eval_path.open("w") as f:
+        json.dump(forecast_eval_metrics, f, indent=2)
+    logger.info("Forecast eval metrics saved to %s", forecast_eval_path)
+
+    scenario_examples_path = metrics_dir / "scenario_examples.json"
+    save_scenario_examples(
+        model=model,
+        val_loader=val_loader,
+        forecast_stats=forecast_stats,
+        vocab=preprocessor.vocab,
+        output_path=scenario_examples_path,
+        device=device,
+        limit=20,
+        top_k=int(config.get("forecasting", {}).get("scenario_top_k", 5)),
+    )
+
     summary = {
         "best_checkpoint": str(best_ckpt),
         "forecast_stats": str(stats_path),
+        "forecast_pretrain_metrics": str(metrics_jsonl_path),
+        "forecast_eval_metrics": str(forecast_eval_path),
+        "scenario_examples": str(scenario_examples_path),
         "vocab_info": vocab_info,
     }
     summary_path = metrics_dir / f"{exp_name}_forecast_pretrain_summary.json"

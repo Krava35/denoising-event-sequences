@@ -12,12 +12,17 @@ from src.data.forecasting import (
     DERIVED_TIME_FEATURE_NAMES,
     build_forecast_stats,
     get_num_feature_dim,
+    has_valid_forecast_cut,
+    sample_forecast_cut,
+    scenario_from_outputs,
 )
 from src.data.preprocessing import EventPreprocessor
 from src.models.dme_encoder import DMEEncoder
 from src.models.pooling import get_pooling
 from src.models.tokenizer import MixedEventTokenizer
+from src.training.forecast_pretrain import forecast_pretrain
 from src.training.losses import compute_forecast_loss, compute_pretraining_loss
+from src.utils.logging import MetricsLogger
 
 
 def _make_df(n_entities: int = 8, events_per_entity: int = 10) -> pd.DataFrame:
@@ -83,7 +88,7 @@ def _config() -> dict:
             "min_future_events": 2,
             "count_num_buckets": 6,
             "gap_num_buckets": 6,
-            "alpha_denoising": 0.2,
+            "alpha_forecast": 0.2,
             "lambda_event_type_profile": 1.0,
             "lambda_count": 0.5,
             "lambda_amount": 0.5,
@@ -131,6 +136,31 @@ def _vocab_info(prep: EventPreprocessor, cfg: dict) -> dict:
         "num_num_features": get_num_feature_dim(prep, cfg),
         "num_classes": 2,
     }
+
+
+def test_forecast_stats_train_only() -> None:
+    cfg = _config()
+    df = _make_df(n_entities=4, events_per_entity=8)
+    df.loc[df["entity_id"] == "e_3", "event_type"] = 999
+    train_ids = ["e_0", "e_1", "e_2"]
+
+    prep = EventPreprocessor(cfg)
+    prep.fit(df, train_ids)
+    stats = build_forecast_stats(df, train_ids, prep, cfg)
+
+    unk_id = prep.vocab[prep.event_type_col]["<UNK>"]
+    assert stats["event_type_global_freq"][unk_id] < 1e-4
+    assert "999" not in prep.vocab[prep.event_type_col]
+
+
+def test_forecast_cut_validity() -> None:
+    cfg = _config()
+    n_events = 10
+    assert has_valid_forecast_cut(n_events, cfg)
+    for _ in range(50):
+        cut = sample_forecast_cut(n_events, cfg)
+        assert 1 <= cut < n_events
+        assert n_events - cut >= cfg["forecasting"]["min_future_events"]
 
 
 def test_tokenizer_profile_token_prepends_sequence() -> None:
@@ -199,6 +229,8 @@ def test_forecast_dataset_targets_and_collate() -> None:
     assert len(targets["future_cat_profiles"]) == 1
     assert targets["future_event_type_profile"].isfinite().all()
     assert targets["future_amount_stats"].isfinite().all()
+    assert 0 <= int(targets["future_count_bucket"]) < cfg["forecasting"]["count_num_buckets"]
+    assert 0 <= int(targets["future_gap_bucket"]) < cfg["forecasting"]["gap_num_buckets"]
 
     batch = collate_fn([dataset[0], dataset[1]])
     forecast_targets = batch["forecast_targets"]
@@ -244,6 +276,31 @@ def test_forecast_heads_and_loss_backward() -> None:
     assert grads and all(g.isfinite().all() for g in grads)
 
 
+def test_scenario_constraints() -> None:
+    torch.manual_seed(0)
+    df, entity_ids, prep, cfg, stats = _bundle()
+    model = DMEEncoder(cfg, _vocab_info(prep, cfg))
+    dataset = EventSequenceDataset(
+        df, entity_ids, prep, cfg, mode="forecast", forecast_stats=stats
+    )
+    batch = next(iter(DataLoader(dataset, batch_size=2, collate_fn=collate_fn)))
+    outputs = model(batch, mode="forecast")
+
+    scenario = scenario_from_outputs(outputs, stats, prep.vocab, top_k=3)
+    valid_event_ids = set(prep.vocab[prep.event_type_col].values())
+    valid_cat_ids = set(prep.vocab[prep.categorical_cols[0]].values())
+
+    assert scenario["future_count_bucket"] in stats["count_bucket_labels"]
+    assert scenario["gap_bucket"] in stats["gap_bucket_labels"]
+    assert len(scenario["dominant_event_types"]) <= 3
+    assert all(item["id"] in valid_event_ids for item in scenario["dominant_event_types"])
+    assert scenario["expected_amount_stats"]["std"] >= 0.0
+    assert 0.0 <= scenario["expected_amount_stats"]["positive_share"] <= 1.0
+    cat_profile = scenario["categorical_profiles"][prep.categorical_cols[0]]
+    assert all(item["id"] in valid_cat_ids for item in cat_profile)
+    assert all(item["probability"] >= 0.0 for item in scenario["dominant_event_types"])
+
+
 def test_hybrid_forecast_smoke_backward() -> None:
     torch.manual_seed(0)
     df, entity_ids, prep, cfg, stats = _bundle()
@@ -271,3 +328,58 @@ def test_hybrid_forecast_smoke_backward() -> None:
     total = denoise_loss["total"] + 0.2 * forecast_loss["total"]
     assert torch.isfinite(total)
     total.backward()
+
+
+def test_forecast_pretrain_one_epoch_saves_checkpoint_and_metrics(tmp_path) -> None:
+    torch.manual_seed(0)
+    df, entity_ids, prep, cfg, stats = _bundle()
+    cfg["training"] = {
+        "num_epochs_pretrain": 1,
+        "batch_size": 4,
+        "lr": 1e-3,
+        "weight_decay": 0.0,
+        "warmup_ratio": 0.0,
+        "gradient_clip_val": 1.0,
+        "mixed_precision": False,
+        "log_every_n_steps": 1,
+    }
+    train_ids = entity_ids[:6]
+    val_ids = entity_ids[6:]
+
+    train_loader = DataLoader(
+        EventSequenceDataset(df, train_ids, prep, cfg, mode="forecast", forecast_stats=stats),
+        batch_size=4,
+        collate_fn=collate_fn,
+    )
+    val_loader = DataLoader(
+        EventSequenceDataset(df, val_ids, prep, cfg, mode="forecast", forecast_stats=stats),
+        batch_size=2,
+        collate_fn=collate_fn,
+    )
+    vocab_info = _vocab_info(prep, cfg)
+    model = DMEEncoder(cfg, vocab_info)
+    pipe = CorruptionPipeline(
+        cfg["corruption"],
+        vocab_sizes={
+            "event_type": vocab_info["event_type_vocab_size"],
+            "cat_features": vocab_info["cat_vocab_sizes"],
+        },
+    )
+    metrics_logger = MetricsLogger(str(tmp_path / "logs"), "forecast_smoke")
+
+    ckpt = forecast_pretrain(
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        corruption_pipeline=pipe,
+        config=cfg,
+        output_dir=str(tmp_path / "checkpoints"),
+        device=torch.device("cpu"),
+        logger=metrics_logger,
+        vocab_info=vocab_info,
+    )
+
+    assert (tmp_path / "checkpoints" / "best_forecast_checkpoint.pt").exists()
+    assert ckpt.endswith("best_forecast_checkpoint.pt")
+    assert metrics_logger.metrics_path.exists()
+    assert metrics_logger.metrics_path.read_text().strip()

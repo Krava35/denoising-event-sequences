@@ -8,6 +8,10 @@ from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
 from src.corruption.pipeline import CorruptionPipeline
+from src.evaluation.forecasting import (
+    compute_forecast_baseline_metrics,
+    compute_forecast_quality_metrics,
+)
 from src.models.dme_encoder import DMEEncoder
 from src.training.losses import compute_forecast_loss, compute_pretraining_loss
 from src.training.optim import build_pretrain_optimizer, get_linear_warmup_scheduler
@@ -84,26 +88,71 @@ def evaluate_forecast_pretrain(
     device: torch.device,
 ) -> dict:
     model.eval()
-    total_loss = 0.0
-    denoising_loss = 0.0
-    forecast_loss = 0.0
+    metric_sums: dict[str, float] = {}
     n_batches = 0
 
     with torch.no_grad():
         for clean_batch in val_loader:
             clean_batch = _batch_to_device(clean_batch, device)
             loss_dict = _compute_hybrid_loss(model, clean_batch, corruption_pipeline, config)
-            total_loss += loss_dict["total"].item()
-            denoising_loss += loss_dict["denoising_total"].item()
-            forecast_loss += loss_dict["forecast_total"].item()
+            batch_metrics = {
+                "loss_total": loss_dict["total"].item(),
+                "loss_denoising": loss_dict["denoising_total"].item(),
+                "loss_forecast": loss_dict["forecast_total"].item(),
+                "forecast_event_type_profile_loss": loss_dict[
+                    "forecast_event_type_profile"
+                ].item(),
+                "forecast_count_bucket_loss": loss_dict["forecast_count_bucket"].item(),
+                "forecast_amount_stats_loss": loss_dict["forecast_amount_stats"].item(),
+                "forecast_gap_bucket_loss": loss_dict["forecast_gap_bucket"].item(),
+                "forecast_cat_profile_loss": loss_dict["forecast_cat_profiles"].item(),
+            }
+            for key, value in batch_metrics.items():
+                metric_sums[key] = metric_sums.get(key, 0.0) + value
             n_batches += 1
 
     model.train()
-    return {
-        "loss_total": total_loss / max(1, n_batches),
-        "loss_denoising": denoising_loss / max(1, n_batches),
-        "loss_forecast": forecast_loss / max(1, n_batches),
-    }
+    return {key: value / max(1, n_batches) for key, value in metric_sums.items()}
+
+
+def evaluate_forecast_quality(
+    model: DMEEncoder,
+    val_loader: DataLoader,
+    config: dict,
+    device: torch.device,
+    forecast_stats: dict,
+) -> dict:
+    model.eval()
+    metric_sums: dict[str, float] = {}
+    n_batches = 0
+    top_k = int(config.get("forecasting", {}).get("scenario_top_k", 5))
+
+    with torch.no_grad():
+        for clean_batch in val_loader:
+            clean_batch = _batch_to_device(clean_batch, device)
+            outputs = model(clean_batch, mode="forecast")
+            targets = clean_batch["forecast_targets"]
+            batch_metrics = {
+                **compute_forecast_quality_metrics(
+                    outputs,
+                    targets,
+                    forecast_stats,
+                    top_k=top_k,
+                ),
+                **compute_forecast_baseline_metrics(
+                    clean_batch,
+                    targets,
+                    forecast_stats,
+                    top_k=top_k,
+                ),
+            }
+            for key, value in batch_metrics.items():
+                if value == value:
+                    metric_sums[key] = metric_sums.get(key, 0.0) + float(value)
+            n_batches += 1
+
+    model.train()
+    return {key: value / max(1, n_batches) for key, value in metric_sums.items()}
 
 
 def forecast_pretrain(

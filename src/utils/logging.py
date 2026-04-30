@@ -19,6 +19,10 @@ class MetricsLogger:
         with self._metrics_path.open("a") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
+    @property
+    def metrics_path(self) -> Path:
+        return self._metrics_path
+
     @staticmethod
     def _format_metrics(metrics: dict) -> str:
         parts: list[str] = []

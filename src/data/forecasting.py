@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
+import torch
 
 if TYPE_CHECKING:
     from src.data.preprocessing import EventPreprocessor
@@ -143,6 +144,69 @@ def _bucketize(value: float, edges: list[float]) -> int:
     return int(np.searchsorted(np.asarray(edges, dtype=float), value, side="right"))
 
 
+def _format_bucket_value(value: float, *, integer: bool = False) -> str:
+    if not np.isfinite(value):
+        return "inf"
+    if integer:
+        return str(int(round(value)))
+    return f"{value:.6g}"
+
+
+def _bucket_bounds(edges: list[float], bucket: int) -> tuple[float, float]:
+    clean_edges = [
+        float(x)
+        for x in np.nan_to_num(np.asarray(edges, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+    ]
+    bucket = int(np.clip(bucket, 0, len(clean_edges)))
+    lower = float("-inf") if bucket == 0 else clean_edges[bucket - 1]
+    upper = float("inf") if bucket == len(clean_edges) else clean_edges[bucket]
+    return lower, upper
+
+
+def _make_bucket_labels(
+    edges: list[float],
+    *,
+    name: str,
+    integer: bool = False,
+    non_negative: bool = False,
+) -> list[str]:
+    clean_edges = [
+        float(x)
+        for x in np.nan_to_num(np.asarray(edges, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+    ]
+    if non_negative:
+        clean_edges = [max(0.0, x) for x in clean_edges]
+    labels: list[str] = []
+    for bucket in range(len(clean_edges) + 1):
+        lower, upper = _bucket_bounds(clean_edges, bucket)
+        if bucket == 0:
+            labels.append(f"{name} <= {_format_bucket_value(upper, integer=integer)}")
+        elif bucket == len(clean_edges):
+            labels.append(f"{name} > {_format_bucket_value(lower, integer=integer)}")
+        else:
+            labels.append(
+                f"{_format_bucket_value(lower, integer=integer)} < {name} <= "
+                f"{_format_bucket_value(upper, integer=integer)}"
+            )
+    return labels
+
+
+def get_count_bucket_labels(forecast_stats: dict) -> list[str]:
+    return _make_bucket_labels(
+        forecast_stats.get("count_bucket_edges", []),
+        name="future_count",
+        integer=True,
+    )
+
+
+def get_gap_bucket_labels(forecast_stats: dict) -> list[str]:
+    return _make_bucket_labels(
+        forecast_stats.get("gap_bucket_edges", []),
+        name="gap",
+        non_negative=True,
+    )
+
+
 def _prepare_transformed_subset(
     df_events: pd.DataFrame,
     entity_ids: list,
@@ -213,13 +277,28 @@ def build_forecast_stats(
             future_counts.append(float(n_events - cut))
             first_future_gaps.append(float(ent["time_delta"].iloc[cut]))
 
+    count_edges = _quantile_edges(future_counts, count_num_buckets)
+    gap_edges = _quantile_edges(first_future_gaps, gap_num_buckets)
+    median_count = float(np.median(future_counts)) if future_counts else 0.0
+    median_gap = float(np.median(first_future_gaps)) if first_future_gaps else 0.0
+
     return {
+        "event_type_col": preprocessor.event_type_col,
+        "categorical_cols": list(preprocessor.categorical_cols),
         "event_type_vocab_size": event_vocab_size,
         "cat_vocab_sizes": cat_vocab_sizes,
         "event_type_global_freq": event_freq.astype(float).tolist(),
         "cat_global_freq": cat_global_freq,
-        "count_bucket_edges": _quantile_edges(future_counts, count_num_buckets),
-        "gap_bucket_edges": _quantile_edges(first_future_gaps, gap_num_buckets),
+        "count_bucket_edges": count_edges,
+        "gap_bucket_edges": gap_edges,
+        "count_bucket_labels": _make_bucket_labels(
+            count_edges,
+            name="future_count",
+            integer=True,
+        ),
+        "gap_bucket_labels": _make_bucket_labels(gap_edges, name="gap", non_negative=True),
+        "median_count_bucket": _bucketize(median_count, count_edges),
+        "median_gap_bucket": _bucketize(median_gap, gap_edges),
         "amount_clip_quantiles": amount_clip,
         "amount_col": amount_col,
         "amount_feature_index": amount_feature_index,
@@ -296,3 +375,274 @@ def make_forecast_targets(sample: dict, cut: int, forecast_stats: dict) -> dict:
         "future_gap_bucket": _bucketize(first_gap, forecast_stats["gap_bucket_edges"]),
         "future_cat_profiles": cat_profiles,
     }
+
+
+def _as_numpy(value, *, index: int = 0) -> np.ndarray:
+    if isinstance(value, torch.Tensor):
+        arr = value.detach().cpu().float().numpy()
+    else:
+        arr = np.asarray(value, dtype=float)
+    if arr.ndim == 0:
+        return arr.reshape(1)
+    if arr.ndim >= 2:
+        return np.asarray(arr[index], dtype=float)
+    return np.asarray(arr, dtype=float)
+
+
+def _normalise_nonnegative(values: np.ndarray) -> np.ndarray:
+    values = np.nan_to_num(values.astype(float), nan=0.0, posinf=0.0, neginf=0.0)
+    clipped = np.clip(values, 0.0, None)
+    total = float(clipped.sum())
+    if total > 0.0:
+        return clipped / total
+
+    shifted = values - float(np.max(values)) if len(values) else values
+    exp_values = np.exp(np.clip(shifted, -50.0, 50.0))
+    exp_total = float(exp_values.sum())
+    if exp_total > 0.0:
+        return exp_values / exp_total
+    return np.full_like(values, 1.0 / max(len(values), 1), dtype=float)
+
+
+def _profile_to_frequency(profile: np.ndarray, forecast_stats: dict) -> np.ndarray:
+    global_freq = np.asarray(forecast_stats["event_type_global_freq"], dtype=float)
+    size = min(len(profile), len(global_freq))
+    if size == 0:
+        return np.empty(0, dtype=float)
+    profile = np.nan_to_num(profile[:size], nan=0.0, posinf=0.0, neginf=0.0)
+    global_freq = np.clip(global_freq[:size], 1e-12, None)
+    frequency = np.exp(np.clip(profile, -30.0, 30.0)) * global_freq
+    return _normalise_nonnegative(frequency)
+
+
+def _invert_vocab(mapping: dict | None) -> dict[int, str]:
+    if not isinstance(mapping, dict):
+        return {}
+    inverted: dict[int, str] = {}
+    for key, value in mapping.items():
+        if isinstance(value, (int, np.integer)):
+            inverted[int(value)] = str(key)
+        elif isinstance(key, (int, np.integer)):
+            inverted[int(key)] = str(value)
+        elif isinstance(key, str) and key.isdigit():
+            inverted[int(key)] = str(value)
+    return inverted
+
+
+def _lookup_vocab_mapping(
+    vocab: dict,
+    *,
+    column: str | None,
+    size: int,
+    used_columns: set[str] | None = None,
+) -> dict[int, str]:
+    used_columns = used_columns if used_columns is not None else set()
+    if column and column in vocab and isinstance(vocab[column], dict):
+        used_columns.add(column)
+        return _invert_vocab(vocab[column])
+
+    preferred = ["event_type", "event_type_col", "mcc", "merchant_category"]
+    for key in preferred:
+        if key in vocab and key not in used_columns and isinstance(vocab[key], dict):
+            candidate = _invert_vocab(vocab[key])
+            if candidate:
+                used_columns.add(key)
+                return candidate
+
+    for key, value in vocab.items():
+        if key in used_columns or not isinstance(value, dict):
+            continue
+        candidate = _invert_vocab(value)
+        if candidate and (not size or max(candidate) < size or len(candidate) == size):
+            used_columns.add(key)
+            return candidate
+
+    return {i: str(i) for i in range(size)}
+
+
+def _valid_profile_ids(id_to_token: dict[int, str], size: int) -> list[int]:
+    valid = [
+        idx
+        for idx, token in sorted(id_to_token.items())
+        if 0 <= idx < size and not str(token).startswith("<")
+    ]
+    if valid:
+        return valid
+    return list(range(size))
+
+
+def _top_profile_entries(
+    probabilities: np.ndarray,
+    id_to_token: dict[int, str],
+    *,
+    top_k: int,
+) -> list[dict]:
+    size = len(probabilities)
+    valid_ids = _valid_profile_ids(id_to_token, size)
+    ranked = sorted(valid_ids, key=lambda idx: float(probabilities[idx]), reverse=True)
+    entries: list[dict] = []
+    for idx in ranked[: max(1, top_k)]:
+        entries.append(
+            {
+                "id": int(idx),
+                "token": id_to_token.get(idx, str(idx)),
+                "probability": float(np.clip(probabilities[idx], 0.0, 1.0)),
+            }
+        )
+    return entries
+
+
+def _bucket_label(stats: dict, key: str, bucket: int) -> str:
+    if key == "count":
+        labels = stats.get("count_bucket_labels") or get_count_bucket_labels(stats)
+    elif key == "gap":
+        labels = stats.get("gap_bucket_labels") or get_gap_bucket_labels(stats)
+    else:
+        raise ValueError(f"Unknown bucket label key: {key}")
+    bucket = int(np.clip(bucket, 0, len(labels) - 1))
+    return labels[bucket]
+
+
+def _expected_amount_stats(
+    values: np.ndarray,
+    forecast_stats: dict,
+    *,
+    count_bucket: int,
+) -> dict[str, float]:
+    amount = np.nan_to_num(values.astype(float), nan=0.0, posinf=0.0, neginf=0.0)
+    if len(amount) < 4:
+        amount = np.pad(amount, (0, 4 - len(amount)), constant_values=0.0)
+
+    lo, hi = forecast_stats.get("amount_clip_quantiles", [0.0, 0.0])
+    lo = float(lo)
+    hi = float(hi)
+    if lo > hi:
+        lo, hi = hi, lo
+    if lo == hi:
+        lo, hi = min(lo, 0.0), max(hi, 0.0)
+
+    count_lower, count_upper = _bucket_bounds(
+        forecast_stats.get("count_bucket_edges", []),
+        count_bucket,
+    )
+    count_cap = count_upper
+    if not np.isfinite(count_cap):
+        count_cap = max(count_lower if np.isfinite(count_lower) else 0.0, 1.0) + 1.0
+    count_cap = max(1.0, float(count_cap))
+
+    sum_lo = min(lo * count_cap, hi * count_cap)
+    sum_hi = max(lo * count_cap, hi * count_cap)
+    std_cap = max(abs(hi - lo), 0.0)
+
+    return {
+        "mean": float(np.clip(amount[0], lo, hi)),
+        "sum": float(np.clip(amount[1], sum_lo, sum_hi)),
+        "std": float(np.clip(amount[2], 0.0, std_cap if std_cap > 0.0 else None)),
+        "positive_share": float(np.clip(amount[3], 0.0, 1.0)),
+    }
+
+
+def scenario_from_outputs(
+    outputs: dict,
+    forecast_stats: dict,
+    vocab: dict,
+    top_k: int = 5,
+) -> dict:
+    """Convert raw forecast head outputs into a constrained aggregate scenario.
+
+    The helper consumes one model output or the first row of a batched output.
+    Returned event/category ids are constrained to the train vocab, bucket names
+    come from forecast_stats, and amount/gap summaries are clipped to finite
+    train-derived ranges.
+    """
+    event_profile = _as_numpy(outputs["future_event_type_profile"])
+    event_prob = _profile_to_frequency(event_profile, forecast_stats)
+    event_vocab = _lookup_vocab_mapping(
+        vocab,
+        column=forecast_stats.get("event_type_col"),
+        size=len(event_prob),
+    )
+
+    count_logits = _as_numpy(outputs["future_count_bucket_logits"])
+    count_bucket = int(np.argmax(count_logits)) if len(count_logits) else 0
+    count_labels = forecast_stats.get("count_bucket_labels") or get_count_bucket_labels(
+        forecast_stats
+    )
+    count_bucket = int(np.clip(count_bucket, 0, len(count_labels) - 1))
+
+    gap_logits = _as_numpy(outputs["future_gap_bucket_logits"])
+    gap_bucket = int(np.argmax(gap_logits)) if len(gap_logits) else 0
+    gap_labels = forecast_stats.get("gap_bucket_labels") or get_gap_bucket_labels(
+        forecast_stats
+    )
+    gap_bucket = int(np.clip(gap_bucket, 0, len(gap_labels) - 1))
+
+    cat_profiles: dict[str, list[dict]] = {}
+    used_columns: set[str] = {forecast_stats.get("event_type_col", "")}
+    cat_columns = forecast_stats.get("categorical_cols") or []
+    cat_outputs = outputs.get("future_cat_profiles") or []
+    for j, pred in enumerate(cat_outputs):
+        values = _as_numpy(pred)
+        probabilities = _normalise_nonnegative(values)
+        col = cat_columns[j] if j < len(cat_columns) else f"cat_{j}"
+        cat_vocab = _lookup_vocab_mapping(
+            vocab,
+            column=col,
+            size=len(probabilities),
+            used_columns=used_columns,
+        )
+        cat_profiles[col] = _top_profile_entries(
+            probabilities,
+            cat_vocab,
+            top_k=top_k,
+        )
+
+    return {
+        "future_count_bucket": _bucket_label(forecast_stats, "count", count_bucket),
+        "dominant_event_types": _top_profile_entries(event_prob, event_vocab, top_k=top_k),
+        "expected_amount_stats": _expected_amount_stats(
+            _as_numpy(outputs["future_amount_stats"]),
+            forecast_stats,
+            count_bucket=count_bucket,
+        ),
+        "gap_bucket": _bucket_label(forecast_stats, "gap", gap_bucket),
+        "categorical_profiles": cat_profiles,
+    }
+
+
+def scenario_from_targets(
+    targets: dict,
+    forecast_stats: dict,
+    vocab: dict,
+    *,
+    index: int = 0,
+    top_k: int = 5,
+) -> dict:
+    """Summarize forecast targets with the same constrained schema as predictions."""
+    count_values = _as_numpy(targets["future_count_bucket"])
+    gap_values = _as_numpy(targets["future_gap_bucket"])
+    count_bucket = int(count_values[index] if len(count_values) > index else count_values[0])
+    gap_bucket = int(gap_values[index] if len(gap_values) > index else gap_values[0])
+    count_size = len(forecast_stats.get("count_bucket_edges", [])) + 1
+    gap_size = len(forecast_stats.get("gap_bucket_edges", [])) + 1
+
+    count_logits = np.full(count_size, -1.0, dtype=float)
+    count_logits[int(np.clip(count_bucket, 0, count_size - 1))] = 1.0
+    gap_logits = np.full(gap_size, -1.0, dtype=float)
+    gap_logits[int(np.clip(gap_bucket, 0, gap_size - 1))] = 1.0
+
+    cat_profiles = []
+    for profile in targets.get("future_cat_profiles", []):
+        cat_profiles.append(_as_numpy(profile, index=index))
+
+    outputs = {
+        "future_event_type_profile": _as_numpy(
+            targets["future_event_type_profile"],
+            index=index,
+        ),
+        "future_count_bucket_logits": count_logits,
+        "future_amount_stats": _as_numpy(targets["future_amount_stats"], index=index),
+        "future_gap_bucket_logits": gap_logits,
+        "future_cat_profiles": cat_profiles,
+    }
+    return scenario_from_outputs(outputs, forecast_stats, vocab, top_k=top_k)
