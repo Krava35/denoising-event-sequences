@@ -8,14 +8,19 @@ from src.models.heads import (
     ClassificationHead,
     EventTypeHead,
     ExistenceHead,
+    FutureAmountStatsHead,
+    FutureCategoricalProfileHead,
+    FutureCountBucketHead,
+    FutureEventTypeProfileHead,
+    FutureGapBucketHead,
     NumericalHead,
     TimeDeltaHead,
 )
-from src.models.pooling import get_pooling
+from src.models.pooling import CLSPooling, MultiPoolingProjection, get_pooling
 from src.models.tokenizer import MixedEventTokenizer
 from src.models.transformer_encoder import TimeAwareTransformerEncoder
 
-_VALID_MODES = {"pretrain", "encode", "finetune"}
+_VALID_MODES = {"pretrain", "encode", "finetune", "forecast"}
 
 
 class DMEEncoder(nn.Module):
@@ -41,7 +46,9 @@ class DMEEncoder(nn.Module):
             hidden_dim=hidden_dim,
             max_seq_len=m["max_seq_len"],
             dropout=m["dropout"],
+            use_profile_token=m.get("use_profile_token", False),
         )
+        self.use_profile_token = bool(m.get("use_profile_token", False))
 
         self.encoder = TimeAwareTransformerEncoder(
             hidden_dim=hidden_dim,
@@ -52,7 +59,20 @@ class DMEEncoder(nn.Module):
             activation=m["activation"],
         )
 
-        self.pooling = get_pooling(config["pooling"]["type"], hidden_dim)
+        pooling_cfg = config.get("pooling", {})
+        pooling_type = pooling_cfg.get("type", "mean")
+        client_embedding_dim = int(m.get("client_embedding_dim", hidden_dim))
+        self.pooling = get_pooling(
+            pooling_type,
+            hidden_dim,
+            client_embedding_dim=client_embedding_dim,
+            components=pooling_cfg.get("components"),
+            dropout=m["dropout"],
+            has_profile_token=self.use_profile_token,
+        )
+        self.representation_dim = (
+            client_embedding_dim if isinstance(self.pooling, MultiPoolingProjection) else hidden_dim
+        )
 
         self.event_type_head = EventTypeHead(hidden_dim, event_type_vocab_size)
         self.time_delta_head = TimeDeltaHead(hidden_dim)
@@ -66,45 +86,102 @@ class DMEEncoder(nn.Module):
         )
 
         self.classifier: ClassificationHead | None = (
-            ClassificationHead(hidden_dim=hidden_dim, num_classes=num_classes, dropout=m["dropout"])
+            ClassificationHead(
+                hidden_dim=self.representation_dim,
+                num_classes=num_classes,
+                dropout=m["dropout"],
+            )
             if num_classes is not None
             else None
         )
 
+        f_cfg = config.get("forecasting", {})
+        self.forecasting_enabled = bool(f_cfg.get("enabled", False))
+        if self.forecasting_enabled:
+            count_buckets = int(f_cfg.get("count_num_buckets", 6))
+            gap_buckets = int(f_cfg.get("gap_num_buckets", 6))
+            self.future_event_type_profile_head = FutureEventTypeProfileHead(
+                self.representation_dim, event_type_vocab_size
+            )
+            self.future_count_bucket_head = FutureCountBucketHead(
+                self.representation_dim, count_buckets
+            )
+            self.future_amount_stats_head = FutureAmountStatsHead(self.representation_dim)
+            self.future_gap_bucket_head = FutureGapBucketHead(self.representation_dim, gap_buckets)
+            self.future_cat_profile_head = FutureCategoricalProfileHead(
+                self.representation_dim, cat_vocab_sizes
+            )
+        else:
+            self.future_event_type_profile_head = None
+            self.future_count_bucket_head = None
+            self.future_amount_stats_head = None
+            self.future_gap_bucket_head = None
+            self.future_cat_profile_head = None
+
     # ── forward ───────────────────────────────────────────────────────────────
+
+    def _prepend_profile_mask(self, attention_mask: torch.Tensor) -> torch.Tensor:
+        if not self.use_profile_token:
+            return attention_mask
+        B = attention_mask.shape[0]
+        profile_mask = torch.ones(B, 1, dtype=attention_mask.dtype, device=attention_mask.device)
+        return torch.cat([profile_mask, attention_mask], dim=1)
+
+    def _pool(self, h: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        if isinstance(self.pooling, MultiPoolingProjection):
+            return self.pooling(h, attention_mask)
+        if self.use_profile_token:
+            if isinstance(self.pooling, CLSPooling):
+                return self.pooling(h, attention_mask)
+            return self.pooling(h[:, 1:, :], attention_mask[:, 1:])
+        return self.pooling(h, attention_mask)
 
     def forward(self, batch: dict, mode: str = "pretrain") -> dict:
         if mode not in _VALID_MODES:
             raise ValueError(f"Unknown mode '{mode}'. Expected one of: {_VALID_MODES}")
 
-        attention_mask: torch.Tensor = batch["attention_mask"]
+        event_attention_mask: torch.Tensor = batch["attention_mask"]
 
         x = self.tokenizer(
             event_type=batch["event_type"],
             time_delta=batch["time_delta"],
             num_features=batch.get("num_features"),
             cat_features=batch.get("cat_features"),
-            attention_mask=attention_mask,
+            attention_mask=event_attention_mask,
         )
-        h = self.encoder(x, attention_mask)  # [B, L, H]
+        attention_mask = self._prepend_profile_mask(event_attention_mask)
+        h = self.encoder(x, attention_mask)  # [B, L(+1), H]
+        event_h = h[:, 1:, :] if self.use_profile_token else h
 
         if mode == "pretrain":
             out: dict = {
-                "event_type_logits": self.event_type_head(h),  # [B, L, V]
-                "time_delta_pred": self.time_delta_head(h),     # [B, L, 1]
-                "existence_logits": self.existence_head(h),     # [B, L, 1]
-                "hidden_states": h,                             # [B, L, H]
+                "event_type_logits": self.event_type_head(event_h),  # [B, L, V]
+                "time_delta_pred": self.time_delta_head(event_h),     # [B, L, 1]
+                "existence_logits": self.existence_head(event_h),     # [B, L, 1]
+                "hidden_states": event_h,                             # [B, L, H]
             }
             if self.numerical_head is not None:
-                out["num_pred"] = self.numerical_head(h)        # [B, L, N]
+                out["num_pred"] = self.numerical_head(event_h)  # [B, L, N]
             if self.cat_head is not None:
-                out["cat_logits"] = self.cat_head(h)            # list[[B, L, V_j]]
+                out["cat_logits"] = self.cat_head(event_h)      # list[[B, L, V_j]]
             return out
 
-        pooled = self.pooling(h, attention_mask)  # [B, H]
+        pooled = self._pool(h, attention_mask)  # [B, H or client_embedding_dim]
 
         if mode == "encode":
             return {"representation": pooled}
+
+        if mode == "forecast":
+            if not self.forecasting_enabled:
+                raise ValueError("DMEEncoder forecasting heads are disabled in config")
+            return {
+                "future_event_type_profile": self.future_event_type_profile_head(pooled),
+                "future_count_bucket_logits": self.future_count_bucket_head(pooled),
+                "future_amount_stats": self.future_amount_stats_head(pooled),
+                "future_gap_bucket_logits": self.future_gap_bucket_head(pooled),
+                "future_cat_profiles": self.future_cat_profile_head(pooled),
+                "representation": pooled,
+            }
 
         # mode == "finetune"
         if self.classifier is None:
@@ -114,7 +191,7 @@ class DMEEncoder(nn.Module):
             )
         return {
             "logits": self.classifier(pooled),  # [B, num_classes]
-            "representation": pooled,           # [B, H]
+            "representation": pooled,           # [B, representation_dim]
         }
 
     # ── parameter helpers ─────────────────────────────────────────────────────
@@ -137,6 +214,14 @@ class DMEEncoder(nn.Module):
             result["numerical_head"] = _n(self.numerical_head)
         if self.cat_head is not None:
             result["cat_head"] = _n(self.cat_head)
+        if self.forecasting_enabled:
+            result["forecast_heads"] = (
+                _n(self.future_event_type_profile_head)
+                + _n(self.future_count_bucket_head)
+                + _n(self.future_amount_stats_head)
+                + _n(self.future_gap_bucket_head)
+                + _n(self.future_cat_profile_head)
+            )
         result["total"] = _n(self)
         return result
 
