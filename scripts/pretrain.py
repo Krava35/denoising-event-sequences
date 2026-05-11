@@ -22,6 +22,7 @@ from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from src.corruption.diffusion import ConditionalSuffixDiffusionPipeline, DiffusionCorruptionPipeline
 from src.corruption.pipeline import CorruptionPipeline
 from src.corruption.transition_matrix import TransitionMatrix
 from src.data.collate import collate_fn
@@ -99,6 +100,26 @@ def build_corruption_pipeline(config: dict, vocab_info: dict, transition_matrix)
     )
 
 
+def build_pretraining_pipeline(config: dict, vocab_info: dict, transition_matrix):
+    objective = config.get("pretraining", {}).get("objective", "denoising")
+    if objective == "denoising":
+        return build_corruption_pipeline(config, vocab_info, transition_matrix)
+    if objective == "diffusion":
+        pipeline_cls = (
+            ConditionalSuffixDiffusionPipeline
+            if config.get("generation", {}).get("enabled", False)
+            else DiffusionCorruptionPipeline
+        )
+        return pipeline_cls(
+            config=config,
+            vocab_sizes={
+                "event_type": vocab_info["event_type_vocab_size"],
+                "cat_features": vocab_info["cat_vocab_sizes"],
+            },
+        )
+    raise ValueError("pretraining.objective must be 'denoising' or 'diffusion'")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -158,7 +179,7 @@ def main() -> None:
 
     # ── Corruption pipeline ───────────────────────────────────────────────────
     transition_matrix = load_transition_matrix(data_dir, config)
-    corruption_pipeline = build_corruption_pipeline(config, vocab_info, transition_matrix)
+    corruption_pipeline = build_pretraining_pipeline(config, vocab_info, transition_matrix)
 
     # ── Train ─────────────────────────────────────────────────────────────────
     exp_name = Path(args.config).stem

@@ -10,12 +10,12 @@ from torch.utils.data import DataLoader
 
 from src.corruption.pipeline import CorruptionPipeline
 from src.models.dme_encoder import DMEEncoder
-from src.training.losses import compute_pretraining_loss
+from src.training.losses import compute_diffusion_pretraining_loss, compute_pretraining_loss
 from src.training.optim import build_pretrain_optimizer, get_linear_warmup_scheduler
 from src.utils.logging import MetricsLogger
 
 # Maps loss_dict keys → config["loss"] lambda keys
-_LOSS_KEY_TO_LAMBDA = {
+_DENOISING_LOSS_KEY_TO_LAMBDA = {
     "event_type": "lambda_event_type",
     "time_delta": "lambda_time",
     "numerical": "lambda_num",
@@ -23,7 +23,33 @@ _LOSS_KEY_TO_LAMBDA = {
     "existence": "lambda_exist",
 }
 
-_CAL_COMPONENTS = list(_LOSS_KEY_TO_LAMBDA.keys())
+_DIFFUSION_LOSS_KEY_TO_LAMBDA = {
+    "event_type": "lambda_event_type",
+    "time_delta": "lambda_time",
+    "numerical": "lambda_num",
+    "categorical": "lambda_cat",
+    "time_delta_eps": "lambda_time_eps",
+    "numerical_eps": "lambda_num_eps",
+}
+
+
+def _pretraining_objective(config: dict) -> str:
+    objective = config.get("pretraining", {}).get("objective", "denoising")
+    if objective not in {"denoising", "diffusion"}:
+        raise ValueError("pretraining.objective must be 'denoising' or 'diffusion'")
+    return objective
+
+
+def _loss_key_to_lambda(config: dict) -> dict[str, str]:
+    if _pretraining_objective(config) == "diffusion":
+        return _DIFFUSION_LOSS_KEY_TO_LAMBDA
+    return _DENOISING_LOSS_KEY_TO_LAMBDA
+
+
+def _compute_pretrain_loss(outputs: dict, targets: dict, masks: dict, config: dict) -> dict:
+    if _pretraining_objective(config) == "diffusion":
+        return compute_diffusion_pretraining_loss(outputs, targets, masks, config)
+    return compute_pretraining_loss(outputs, targets, masks, config)
 
 
 def _compute_calibration_recommendations(
@@ -32,13 +58,15 @@ def _compute_calibration_recommendations(
     config: dict,
 ) -> tuple[dict[str, float], dict[str, float], float]:
     """Compute mean component losses and lambda weights for loss calibration."""
-    means = {k: component_sums[k] / max(1, warmup_steps) for k in _CAL_COMPONENTS}
+    loss_key_to_lambda = _loss_key_to_lambda(config)
+    components = list(loss_key_to_lambda)
+    means = {k: component_sums[k] / max(1, warmup_steps) for k in components}
     ref = means.get("event_type") or 1.0
     nonzero = [v for v in means.values() if v > 0]
     max_min_ratio = (max(nonzero) / min(nonzero)) if len(nonzero) >= 2 else 1.0
 
     recommended = {
-        _LOSS_KEY_TO_LAMBDA[k]: ref / max(v, 1e-8)
+        loss_key_to_lambda[k]: ref / max(v, 1e-8)
         for k, v in means.items()
     }
 
@@ -58,7 +86,7 @@ def _log_calibration_recommendations(
 
     print("\n=== Loss Calibration ===")
     for k, v in means.items():
-        lk = _LOSS_KEY_TO_LAMBDA[k]
+        lk = _loss_key_to_lambda(config)[k]
         print(
             f"  {k:<16}: mean={v:.6f}  rec_λ={recommended[lk]:.4f}  "
             f"cur_λ={loss_cfg.get(lk, '—')}"
@@ -116,7 +144,7 @@ def _apply_calibration(
 
     print("\n=== Loss Calibration ===")
     for k, v in means.items():
-        lk = _LOSS_KEY_TO_LAMBDA[k]
+        lk = _loss_key_to_lambda(config)[k]
         print(f"  {k:<16}: mean={v:.6f}  rec_λ={recommended[lk]:.4f}  "
               f"cur_λ={loss_cfg.get(lk, '—')}")
     print(f"  max/min ratio: {max_min_ratio:.1f}x")
@@ -170,7 +198,7 @@ def evaluate_pretrain(
             masks["attention_mask"] = corrupted_batch["attention_mask"]
 
             outputs = model(corrupted_batch, mode="pretrain")
-            loss_dict = compute_pretraining_loss(outputs, targets, masks, config)
+            loss_dict = _compute_pretrain_loss(outputs, targets, masks, config)
 
             total_loss += loss_dict["total"].item()
             total_loss_event_type += loss_dict["event_type"].item()
@@ -254,7 +282,7 @@ def pretrain(
 
             with torch.autocast(device_type=device.type, enabled=use_amp):
                 outputs = model(corrupted_batch, mode="pretrain")
-                loss_dict = compute_pretraining_loss(outputs, targets, masks, config)
+                loss_dict = _compute_pretrain_loss(outputs, targets, masks, config)
 
             if use_scaler:
                 scaler.scale(loss_dict["total"]).backward()
@@ -273,7 +301,7 @@ def pretrain(
 
             # Accumulate calibration statistics
             if cal_enabled and not cal_logged:
-                for k in _CAL_COMPONENTS:
+                for k in _loss_key_to_lambda(config):
                     cal_sums[k] += loss_dict[k].item()
                 cal_steps_done += 1
                 if cal_steps_done >= cal_warmup_steps:

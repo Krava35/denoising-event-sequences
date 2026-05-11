@@ -49,6 +49,13 @@ class DMEEncoder(nn.Module):
             use_profile_token=m.get("use_profile_token", False),
         )
         self.use_profile_token = bool(m.get("use_profile_token", False))
+        self.diffusion_enabled = (
+            config.get("pretraining", {}).get("objective", "denoising") == "diffusion"
+        )
+        diffusion_steps = int(config.get("diffusion", {}).get("num_steps", 100))
+        self.diffusion_timestep_embedding = (
+            nn.Embedding(diffusion_steps + 1, hidden_dim) if self.diffusion_enabled else None
+        )
 
         self.encoder = TimeAwareTransformerEncoder(
             hidden_dim=hidden_dim,
@@ -77,9 +84,17 @@ class DMEEncoder(nn.Module):
         self.event_type_head = EventTypeHead(hidden_dim, event_type_vocab_size)
         self.time_delta_head = TimeDeltaHead(hidden_dim)
         self.existence_head = ExistenceHead(hidden_dim)
+        self.time_delta_eps_head: TimeDeltaHead | None = (
+            TimeDeltaHead(hidden_dim) if self.diffusion_enabled else None
+        )
 
         self.numerical_head: NumericalHead | None = (
             NumericalHead(hidden_dim, num_num_features) if num_num_features > 0 else None
+        )
+        self.numerical_eps_head: NumericalHead | None = (
+            NumericalHead(hidden_dim, num_num_features)
+            if self.diffusion_enabled and num_num_features > 0
+            else None
         )
         self.cat_head: CategoricalHead | None = (
             CategoricalHead(hidden_dim, cat_vocab_sizes) if cat_vocab_sizes else None
@@ -150,6 +165,10 @@ class DMEEncoder(nn.Module):
             attention_mask=event_attention_mask,
         )
         attention_mask = self._prepend_profile_mask(event_attention_mask)
+        if self.diffusion_timestep_embedding is not None and "diffusion_t" in batch:
+            t_emb = self.diffusion_timestep_embedding(batch["diffusion_t"].long())
+            x = x + t_emb.unsqueeze(1)
+            x = x * attention_mask.unsqueeze(-1).float()
         h = self.encoder(x, attention_mask)  # [B, L(+1), H]
         event_h = h[:, 1:, :] if self.use_profile_token else h
 
@@ -164,6 +183,10 @@ class DMEEncoder(nn.Module):
                 out["num_pred"] = self.numerical_head(event_h)  # [B, L, N]
             if self.cat_head is not None:
                 out["cat_logits"] = self.cat_head(event_h)      # list[[B, L, V_j]]
+            if self.time_delta_eps_head is not None:
+                out["time_delta_eps_pred"] = self.time_delta_eps_head(event_h)
+            if self.numerical_eps_head is not None:
+                out["num_eps_pred"] = self.numerical_eps_head(event_h)
             return out
 
         pooled = self._pool(h, attention_mask)  # [B, H or client_embedding_dim]
@@ -212,6 +235,12 @@ class DMEEncoder(nn.Module):
             result["classifier"] = _n(self.classifier)
         if self.numerical_head is not None:
             result["numerical_head"] = _n(self.numerical_head)
+        if self.time_delta_eps_head is not None:
+            result["time_delta_eps_head"] = _n(self.time_delta_eps_head)
+        if self.numerical_eps_head is not None:
+            result["numerical_eps_head"] = _n(self.numerical_eps_head)
+        if self.diffusion_timestep_embedding is not None:
+            result["diffusion_timestep_embedding"] = _n(self.diffusion_timestep_embedding)
         if self.cat_head is not None:
             result["cat_head"] = _n(self.cat_head)
         if self.forecasting_enabled:
