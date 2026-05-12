@@ -282,6 +282,11 @@ def generate_suffix(
     temperature_event = float(g_cfg.get("temperature_event_type", 1.0))
     temperature_cat = float(g_cfg.get("temperature_cat", 1.0))
     top_k_event = int(g_cfg.get("top_k_event_type", 20))
+    d3pm_cfg = config.get("d3pm", {})
+    use_d3pm_prev_logits = bool(
+        d3pm_cfg.get("enabled", False)
+        and d3pm_cfg.get("use_prev_logits_for_sampling", False)
+    )
     final_outputs: dict | None = None
 
     model.eval()
@@ -296,8 +301,13 @@ def generate_suffix(
         outputs = model(batch, mode="pretrain")
         final_outputs = outputs
 
+        event_logits = (
+            outputs.get("event_type_prev_logits")
+            if use_d3pm_prev_logits and outputs.get("event_type_prev_logits") is not None
+            else outputs["event_type_logits"]
+        )
         sampled_event = _sample_discrete(
-            outputs["event_type_logits"],
+            event_logits,
             temperature=temperature_event,
             top_k=top_k_event,
         )

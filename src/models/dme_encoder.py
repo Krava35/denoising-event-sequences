@@ -52,6 +52,11 @@ class DMEEncoder(nn.Module):
         self.diffusion_enabled = (
             config.get("pretraining", {}).get("objective", "denoising") == "diffusion"
         )
+        d3pm_cfg = config.get("d3pm", {})
+        self.d3pm_event_type_enabled = (
+            bool(d3pm_cfg.get("enabled", False))
+            and "event_type" in set(d3pm_cfg.get("apply_to", ["event_type"]))
+        )
         diffusion_steps = int(config.get("diffusion", {}).get("num_steps", 100))
         self.diffusion_timestep_embedding = (
             nn.Embedding(diffusion_steps + 1, hidden_dim) if self.diffusion_enabled else None
@@ -82,6 +87,11 @@ class DMEEncoder(nn.Module):
         )
 
         self.event_type_head = EventTypeHead(hidden_dim, event_type_vocab_size)
+        self.event_type_prev_head: EventTypeHead | None = (
+            EventTypeHead(hidden_dim, event_type_vocab_size)
+            if self.diffusion_enabled and self.d3pm_event_type_enabled
+            else None
+        )
         self.time_delta_head = TimeDeltaHead(hidden_dim)
         self.existence_head = ExistenceHead(hidden_dim)
         self.time_delta_eps_head: TimeDeltaHead | None = (
@@ -111,7 +121,11 @@ class DMEEncoder(nn.Module):
         )
 
         f_cfg = config.get("forecasting", {})
-        self.forecasting_enabled = bool(f_cfg.get("enabled", False))
+        self.forecasting_enabled = bool(
+            f_cfg.get("enabled", False)
+            or f_cfg.get("pretrain_aux_enabled", False)
+            or f_cfg.get("finetune_aux_enabled", False)
+        )
         if self.forecasting_enabled:
             count_buckets = int(f_cfg.get("count_num_buckets", 6))
             gap_buckets = int(f_cfg.get("gap_num_buckets", 6))
@@ -187,6 +201,8 @@ class DMEEncoder(nn.Module):
                 out["time_delta_eps_pred"] = self.time_delta_eps_head(event_h)
             if self.numerical_eps_head is not None:
                 out["num_eps_pred"] = self.numerical_eps_head(event_h)
+            if self.event_type_prev_head is not None:
+                out["event_type_prev_logits"] = self.event_type_prev_head(event_h)
             return out
 
         pooled = self._pool(h, attention_mask)  # [B, H or client_embedding_dim]
@@ -241,6 +257,8 @@ class DMEEncoder(nn.Module):
             result["numerical_eps_head"] = _n(self.numerical_eps_head)
         if self.diffusion_timestep_embedding is not None:
             result["diffusion_timestep_embedding"] = _n(self.diffusion_timestep_embedding)
+        if self.event_type_prev_head is not None:
+            result["event_type_prev_head"] = _n(self.event_type_prev_head)
         if self.cat_head is not None:
             result["cat_head"] = _n(self.cat_head)
         if self.forecasting_enabled:

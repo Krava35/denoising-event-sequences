@@ -85,6 +85,14 @@ class DiffusionCorruptionPipeline:
         if not 0.0 <= self.discrete_mask_fraction <= 1.0:
             raise ValueError("discrete_mask_fraction must be in [0, 1]")
 
+        d3pm_cfg = config.get("d3pm", {})
+        self.d3pm_enabled = bool(d3pm_cfg.get("enabled", False))
+        self.d3pm_transition = d3pm_cfg.get("transition", "absorbing_uniform")
+        if self.d3pm_enabled and self.d3pm_transition != "absorbing_uniform":
+            raise ValueError("Only d3pm.transition='absorbing_uniform' is supported")
+        self.d3pm_apply_to = set(d3pm_cfg.get("apply_to", ["event_type"]))
+        self.d3pm_event_type_enabled = self.d3pm_enabled and "event_type" in self.d3pm_apply_to
+
     def _sample_timesteps(self, batch_size: int, device: torch.device) -> LongTensor:
         return torch.randint(1, self.schedule.num_steps + 1, (batch_size,), device=device)
 
@@ -114,6 +122,21 @@ class DiffusionCorruptionPipeline:
 
         corrupted = torch.where(is_mask, torch.full_like(corrupted, 2), corrupted)
         return torch.where(attention_mask, corrupted, torch.zeros_like(corrupted))
+
+    def _corrupt_event_type_d3pm_pair(
+        self,
+        event_type: LongTensor,
+        attention_mask: BoolTensor,
+        timesteps: LongTensor,
+    ) -> tuple[LongTensor, LongTensor]:
+        """Sample adjacent discrete states x_t and x_{t-1} for the D3PM auxiliary."""
+        prev_timesteps = torch.clamp(timesteps - 1, min=0)
+        alpha_bar_prev = self.schedule.alpha_bar(prev_timesteps, dtype=torch.float32)
+        x_prev = self._corrupt_event_type(event_type, attention_mask, alpha_bar_prev)
+
+        alpha_step = self.schedule.alphas.to(device=timesteps.device)[timesteps].to(torch.float32)
+        x_t = self._corrupt_event_type(x_prev, attention_mask, alpha_step)
+        return x_t, torch.where(attention_mask, x_prev, torch.zeros_like(x_prev))
 
     def _corrupt_categorical_features(
         self,
@@ -184,9 +207,17 @@ class DiffusionCorruptionPipeline:
 
         if "event_type" in clean_batch:
             targets["event_type"] = clean_batch["event_type"].clone()
-            batch["event_type"] = self._corrupt_event_type(
-                clean_batch["event_type"], attention_mask, alpha_bar
-            )
+            if self.d3pm_event_type_enabled:
+                event_type_t, event_type_prev = self._corrupt_event_type_d3pm_pair(
+                    clean_batch["event_type"], attention_mask, timesteps
+                )
+                batch["event_type"] = event_type_t
+                targets["d3pm_event_type_prev"] = event_type_prev
+                masks["d3pm_event_type_prev"] = attention_mask.clone()
+            else:
+                batch["event_type"] = self._corrupt_event_type(
+                    clean_batch["event_type"], attention_mask, alpha_bar
+                )
             masks["event_type"] = attention_mask.clone()
 
         if "cat_features" in clean_batch:
@@ -294,11 +325,23 @@ class ConditionalSuffixDiffusionPipeline(DiffusionCorruptionPipeline):
         alpha_bar = self.schedule.alpha_bar(timesteps, dtype=torch.float32)
         batch["diffusion_t"] = timesteps
 
-        prefix_lengths = _sample_prefix_lengths(
-            attention_mask,
-            self._cfg,
-            suffix_len=self.suffix_len,
-        )
+        if "forecast_cut" in clean_batch:
+            prefix_lengths = clean_batch["forecast_cut"].to(
+                device=attention_mask.device,
+                dtype=torch.long,
+            )
+            prefix_lengths = torch.clamp(
+                prefix_lengths,
+                min=1,
+                max=max(1, attention_mask.shape[1] - 1),
+            )
+            prefix_lengths = torch.minimum(prefix_lengths, attention_mask.sum(dim=1).long())
+        else:
+            prefix_lengths = _sample_prefix_lengths(
+                attention_mask,
+                self._cfg,
+                suffix_len=self.suffix_len,
+            )
         prefix_mask, suffix_mask = _prefix_suffix_masks(
             attention_mask,
             prefix_lengths,
@@ -316,9 +359,16 @@ class ConditionalSuffixDiffusionPipeline(DiffusionCorruptionPipeline):
 
         if "event_type" in clean_batch:
             targets["event_type"] = clean_batch["event_type"].clone()
-            corrupted_suffix = self._corrupt_event_type(
-                clean_batch["event_type"], suffix_mask, alpha_bar
-            )
+            if self.d3pm_event_type_enabled:
+                corrupted_suffix, event_type_prev = self._corrupt_event_type_d3pm_pair(
+                    clean_batch["event_type"], suffix_mask, timesteps
+                )
+                targets["d3pm_event_type_prev"] = event_type_prev
+                masks["d3pm_event_type_prev"] = suffix_mask.clone()
+            else:
+                corrupted_suffix = self._corrupt_event_type(
+                    clean_batch["event_type"], suffix_mask, alpha_bar
+                )
             event_type = torch.where(suffix_mask, corrupted_suffix, clean_batch["event_type"])
             batch["event_type"] = torch.where(
                 effective_attention,

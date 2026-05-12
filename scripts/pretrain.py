@@ -27,7 +27,7 @@ from src.corruption.pipeline import CorruptionPipeline
 from src.corruption.transition_matrix import TransitionMatrix
 from src.data.collate import collate_fn
 from src.data.dataset import EventSequenceDataset
-from src.data.forecasting import get_num_feature_dim
+from src.data.forecasting import build_forecast_stats, get_num_feature_dim, save_forecast_stats
 from src.data.splits import load_splits
 from src.models.dme_encoder import DMEEncoder
 from src.training.pretrain import pretrain
@@ -130,6 +130,11 @@ def main() -> None:
         dataset_path=args.dataset,
         ablation_path=args.ablation,
     )
+    if config.get("forecasting", {}).get("pretrain_aux_enabled", False):
+        config = {
+            **config,
+            "forecasting": {**config.get("forecasting", {}), "enabled": True},
+        }
 
     seed = config.get("seed", {}).get("global_seed", 42)
     set_seed(seed)
@@ -153,16 +158,37 @@ def main() -> None:
 
     vocab_info = build_vocab_info(preprocessor, config)
     logger.info("Vocab info: %s", {k: v for k, v in vocab_info.items() if k != "cat_vocab_sizes"})
+    forecast_stats = None
+    forecast_stats_path = None
+    if config.get("forecasting", {}).get("pretrain_aux_enabled", False):
+        forecast_stats = build_forecast_stats(df_events, splits["train"], preprocessor, config)
+        forecast_stats_path = checkpoints_dir / "forecast_stats.json"
+        save_forecast_stats(forecast_stats, forecast_stats_path)
+        logger.info("Forecast stats saved to %s", forecast_stats_path)
 
     # ── Datasets and loaders ──────────────────────────────────────────────────
     batch_size = int(config.get("training", {}).get("batch_size", 128))
 
     train_loader = DataLoader(
-        EventSequenceDataset(df_events, splits["train"], preprocessor, config, mode="pretrain"),
+        EventSequenceDataset(
+            df_events,
+            splits["train"],
+            preprocessor,
+            config,
+            mode="pretrain",
+            forecast_stats=forecast_stats,
+        ),
         batch_size=batch_size, shuffle=True, collate_fn=collate_fn, num_workers=0,
     )
     val_loader = DataLoader(
-        EventSequenceDataset(df_events, splits["val"], preprocessor, config, mode="pretrain"),
+        EventSequenceDataset(
+            df_events,
+            splits["val"],
+            preprocessor,
+            config,
+            mode="pretrain",
+            forecast_stats=forecast_stats,
+        ),
         batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=0,
     )
     logger.info("DataLoaders: %d train batches | %d val batches", len(train_loader), len(val_loader))
@@ -205,6 +231,8 @@ def main() -> None:
     metrics_dir = output_dir / "metrics"
     metrics_dir.mkdir(parents=True, exist_ok=True)
     summary = {"best_checkpoint": str(best_ckpt), "vocab_info": vocab_info}
+    if forecast_stats_path is not None:
+        summary["forecast_stats"] = str(forecast_stats_path)
     summary_path = metrics_dir / f"{exp_name}_pretrain_summary.json"
     with summary_path.open("w") as f:
         json.dump(summary, f, indent=2)

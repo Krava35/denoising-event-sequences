@@ -81,6 +81,35 @@ def test_diffusion_pipeline_shapes_and_padding() -> None:
     assert torch.isfinite(corrupted["num_features"]).all()
 
 
+def test_diffusion_pipeline_d3pm_event_type_prev_target() -> None:
+    torch.manual_seed(43)
+    batch = _make_batch()
+    pipe = DiffusionCorruptionPipeline(
+        {
+            "diffusion": {
+                "num_steps": 12,
+                "beta_start": 1e-4,
+                "beta_end": 2e-2,
+                "discrete_mask_fraction": 0.8,
+            },
+            "d3pm": {
+                "enabled": True,
+                "apply_to": ["event_type"],
+                "loss_weight_event_type_prev": 0.25,
+            },
+        },
+        vocab_sizes={"event_type": 20, "cat_features": [12, 15]},
+    )
+
+    corrupted, targets, masks = pipe(batch)
+
+    assert corrupted["event_type"].shape == batch["event_type"].shape
+    assert targets["d3pm_event_type_prev"].shape == batch["event_type"].shape
+    assert masks["d3pm_event_type_prev"].equal(batch["attention_mask"])
+    assert int(targets["d3pm_event_type_prev"][batch["attention_mask"]].min().item()) >= 0
+    assert (targets["d3pm_event_type_prev"][~batch["attention_mask"]] == 0).all()
+
+
 def test_continuous_corruption_matches_closed_form() -> None:
     torch.manual_seed(7)
     values = torch.randn(2, 4)
@@ -140,3 +169,29 @@ def test_conditional_suffix_diffusion_keeps_prefix_clean() -> None:
     assert (corrupted["event_type"][~effective_attention] == 0).all()
     assert (corrupted["cat_features"][~effective_attention] == 0).all()
     assert targets["event_type"].equal(batch["event_type"])
+
+
+def test_conditional_suffix_uses_forecast_cut_as_prefix() -> None:
+    torch.manual_seed(124)
+    batch = _make_batch()
+    batch["forecast_cut"] = torch.tensor([3, 4, 5, 6], dtype=torch.long)
+    pipe = ConditionalSuffixDiffusionPipeline(
+        {
+            "diffusion": {
+                "num_steps": 12,
+                "beta_start": 1e-4,
+                "beta_end": 2e-2,
+                "discrete_mask_fraction": 1.0,
+            },
+            "generation": {
+                "suffix_len": 2,
+                "prefix_min_ratio": 0.5,
+                "prefix_max_ratio": 0.5,
+            },
+        },
+        vocab_sizes={"event_type": 20, "cat_features": [12, 15]},
+    )
+
+    _, _, masks = pipe(batch)
+
+    assert torch.equal(masks["generation_prefix"].sum(dim=1), batch["forecast_cut"])

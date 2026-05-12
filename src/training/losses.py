@@ -114,6 +114,9 @@ def compute_diffusion_pretraining_loss(
     lambda_cat = float(loss_cfg.get("lambda_cat", 0.5))
     lambda_time_eps = float(loss_cfg.get("lambda_time_eps", 0.1))
     lambda_num_eps = float(loss_cfg.get("lambda_num_eps", 0.1))
+    lambda_d3pm_event_prev = float(
+        config.get("d3pm", {}).get("loss_weight_event_type_prev", 0.0)
+    )
 
     device = outputs["event_type_logits"].device
 
@@ -173,6 +176,21 @@ def compute_diffusion_pretraining_loss(
     else:
         L_cat = torch.zeros((), device=device)
 
+    has_d3pm_event_prev = (
+        lambda_d3pm_event_prev > 0.0
+        and "event_type_prev_logits" in outputs
+        and "d3pm_event_type_prev" in targets
+        and "d3pm_event_type_prev" in masks
+    )
+    if has_d3pm_event_prev:
+        L_d3pm_event_prev = _masked_cross_entropy(
+            outputs["event_type_prev_logits"],
+            targets["d3pm_event_type_prev"],
+            masks["d3pm_event_type_prev"],
+        )
+    else:
+        L_d3pm_event_prev = torch.zeros((), device=device)
+
     L_total = (
         lambda_type * L_type
         + lambda_time * L_time
@@ -180,9 +198,10 @@ def compute_diffusion_pretraining_loss(
         + lambda_cat * L_cat
         + lambda_time_eps * L_time_eps
         + lambda_num_eps * L_num_eps
+        + lambda_d3pm_event_prev * L_d3pm_event_prev
     )
 
-    return {
+    result = {
         "total": L_total,
         "event_type": L_type,
         "time_delta": L_time,
@@ -191,6 +210,9 @@ def compute_diffusion_pretraining_loss(
         "time_delta_eps": L_time_eps,
         "numerical_eps": L_num_eps,
     }
+    if has_d3pm_event_prev:
+        result["d3pm_event_type_prev"] = L_d3pm_event_prev
+    return result
 
 
 def compute_forecast_loss(

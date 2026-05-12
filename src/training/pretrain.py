@@ -10,7 +10,11 @@ from torch.utils.data import DataLoader
 
 from src.corruption.pipeline import CorruptionPipeline
 from src.models.dme_encoder import DMEEncoder
-from src.training.losses import compute_diffusion_pretraining_loss, compute_pretraining_loss
+from src.training.losses import (
+    compute_diffusion_pretraining_loss,
+    compute_forecast_loss,
+    compute_pretraining_loss,
+)
 from src.training.optim import build_pretrain_optimizer, get_linear_warmup_scheduler
 from src.utils.logging import MetricsLogger
 
@@ -101,8 +105,83 @@ def _log_calibration_recommendations(
     return recommended
 
 
-def _batch_to_device(batch: dict, device: torch.device) -> dict:
-    return {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+def _batch_to_device(value, device: torch.device):
+    if isinstance(value, torch.Tensor):
+        return value.to(device)
+    if isinstance(value, dict):
+        return {k: _batch_to_device(v, device) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_batch_to_device(v, device) for v in value]
+    return value
+
+
+def _forecast_pretrain_aux_enabled(config: dict) -> bool:
+    return bool(config.get("forecasting", {}).get("pretrain_aux_enabled", False))
+
+
+def _prefix_mask_from_batch(clean_batch: dict, masks: dict) -> torch.Tensor | None:
+    prefix_mask = masks.get("generation_prefix")
+    if isinstance(prefix_mask, torch.Tensor):
+        return prefix_mask
+
+    forecast_cut = clean_batch.get("forecast_cut")
+    attention_mask = clean_batch.get("attention_mask")
+    if not isinstance(forecast_cut, torch.Tensor) or not isinstance(attention_mask, torch.Tensor):
+        return None
+    positions = torch.arange(attention_mask.shape[1], device=attention_mask.device).unsqueeze(0)
+    return (positions < forecast_cut.long().unsqueeze(1)) & attention_mask
+
+
+def _mask_sequence_tensor(value: torch.Tensor, prefix_mask: torch.Tensor) -> torch.Tensor:
+    mask = prefix_mask
+    while mask.ndim < value.ndim:
+        mask = mask.unsqueeze(-1)
+    return torch.where(mask, value, torch.zeros_like(value))
+
+
+def _make_forecast_prefix_batch(clean_batch: dict, masks: dict) -> dict:
+    prefix_mask = _prefix_mask_from_batch(clean_batch, masks)
+    if prefix_mask is None:
+        raise ValueError("forecast auxiliary requires generation_prefix masks or forecast_cut")
+
+    result: dict = {
+        "attention_mask": prefix_mask,
+    }
+    for key in ("event_type", "time_delta", "num_features", "cat_features"):
+        if key in clean_batch:
+            result[key] = _mask_sequence_tensor(clean_batch[key], prefix_mask)
+    for key in ("label", "entity_id"):
+        if key in clean_batch:
+            result[key] = clean_batch[key]
+    return result
+
+
+def _add_forecast_auxiliary_loss(
+    model: DMEEncoder,
+    clean_batch: dict,
+    masks: dict,
+    loss_dict: dict,
+    config: dict,
+) -> dict:
+    if not _forecast_pretrain_aux_enabled(config) or "forecast_targets" not in clean_batch:
+        return loss_dict
+
+    forecast_batch = _make_forecast_prefix_batch(clean_batch, masks)
+    forecast_outputs = model(forecast_batch, mode="forecast")
+    forecast_loss = compute_forecast_loss(
+        forecast_outputs,
+        clean_batch["forecast_targets"],
+        config,
+    )
+    weight = float(config.get("forecasting", {}).get("pretrain_aux_weight", 0.03))
+
+    result = dict(loss_dict)
+    result["total"] = result["total"] + weight * forecast_loss["total"]
+    result["forecast_total"] = forecast_loss["total"]
+    for key, value in forecast_loss.items():
+        if key != "total":
+            result[f"forecast_{key}"] = value
+    return result
 
 
 def _save_checkpoint(
@@ -185,6 +264,7 @@ def evaluate_pretrain(
     total_loss = 0.0
     total_loss_event_type = 0.0
     total_loss_time_delta = 0.0
+    optional_sums: dict[str, float] = defaultdict(float)
     correct_types = 0
     total_type_positions = 0
     sum_mae = 0.0
@@ -199,10 +279,20 @@ def evaluate_pretrain(
 
             outputs = model(corrupted_batch, mode="pretrain")
             loss_dict = _compute_pretrain_loss(outputs, targets, masks, config)
+            loss_dict = _add_forecast_auxiliary_loss(
+                model,
+                clean_batch,
+                masks,
+                loss_dict,
+                config,
+            )
 
             total_loss += loss_dict["total"].item()
             total_loss_event_type += loss_dict["event_type"].item()
             total_loss_time_delta += loss_dict["time_delta"].item()
+            for key in ("d3pm_event_type_prev", "forecast_total"):
+                if key in loss_dict:
+                    optional_sums[key] += loss_dict[key].item()
 
             type_mask = masks["event_type"]
             if type_mask.any():
@@ -221,13 +311,21 @@ def evaluate_pretrain(
             n_batches += 1
 
     model.train()
-    return {
+    metrics = {
         "loss_total": total_loss / max(1, n_batches),
         "loss_event_type": total_loss_event_type / max(1, n_batches),
         "loss_time_delta": total_loss_time_delta / max(1, n_batches),
         "event_type_accuracy": correct_types / max(1, total_type_positions),
         "time_delta_mae": sum_mae / max(1, total_time_positions),
     }
+    if "d3pm_event_type_prev" in optional_sums:
+        metrics["loss_d3pm_event_type_prev"] = optional_sums["d3pm_event_type_prev"] / max(
+            1,
+            n_batches,
+        )
+    if "forecast_total" in optional_sums:
+        metrics["loss_forecast"] = optional_sums["forecast_total"] / max(1, n_batches)
+    return metrics
 
 
 def pretrain(
@@ -283,6 +381,13 @@ def pretrain(
             with torch.autocast(device_type=device.type, enabled=use_amp):
                 outputs = model(corrupted_batch, mode="pretrain")
                 loss_dict = _compute_pretrain_loss(outputs, targets, masks, config)
+                loss_dict = _add_forecast_auxiliary_loss(
+                    model,
+                    clean_batch,
+                    masks,
+                    loss_dict,
+                    config,
+                )
 
             if use_scaler:
                 scaler.scale(loss_dict["total"]).backward()

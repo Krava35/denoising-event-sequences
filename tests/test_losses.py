@@ -199,6 +199,34 @@ def test_diffusion_loss_components_and_gradients() -> None:
     assert outputs["num_eps_pred"].grad is not None
 
 
+def test_diffusion_loss_d3pm_auxiliary_component() -> None:
+    torch.manual_seed(42)
+    outputs = _make_diffusion_outputs()
+    outputs["event_type_prev_logits"] = torch.randn(
+        B,
+        L,
+        V_TYPE,
+        requires_grad=True,
+    )
+    targets = _make_diffusion_targets()
+    targets["d3pm_event_type_prev"] = torch.randint(0, V_TYPE, (B, L))
+    masks = _full_diffusion_masks()
+    masks["d3pm_event_type_prev"] = torch.ones(B, L, dtype=torch.bool)
+    config = {
+        **CONFIG,
+        "d3pm": {
+            "enabled": True,
+            "loss_weight_event_type_prev": 0.25,
+        },
+    }
+
+    result = compute_diffusion_pretraining_loss(outputs, targets, masks, config)
+    result["total"].backward()
+
+    assert result["d3pm_event_type_prev"].item() > 0.0
+    assert outputs["event_type_prev_logits"].grad is not None
+
+
 def test_diffusion_loss_ignores_padding() -> None:
     torch.manual_seed(42)
     outputs = _make_diffusion_outputs()

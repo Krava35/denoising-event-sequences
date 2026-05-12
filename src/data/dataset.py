@@ -42,10 +42,17 @@ class EventSequenceDataset(Dataset):
         data_cfg = config.get("data", {})
         self.max_seq_len: int = int(data_cfg.get("max_seq_len", 256))
         self.mode = mode
+        self._needs_forecast_targets = (
+            mode == "forecast"
+            or (
+                mode == "pretrain"
+                and bool(config.get("forecasting", {}).get("pretrain_aux_enabled", False))
+            )
+        )
         self._time_feature_names = get_derived_time_feature_names(config)
         self.forecast_stats = (
             forecast_stats
-            if forecast_stats is not None or mode != "forecast"
+            if forecast_stats is not None or not self._needs_forecast_targets
             else build_forecast_stats(df_events, entity_ids, preprocessor, config)
         )
 
@@ -104,7 +111,8 @@ class EventSequenceDataset(Dataset):
                 else np.empty((N, 0), dtype=np.int64)
             )
 
-            if mode == "forecast" and not has_valid_forecast_cut(N, config):
+            forecast_len = min(N, self.max_seq_len) if mode == "pretrain" else N
+            if self._needs_forecast_targets and not has_valid_forecast_cut(forecast_len, config):
                 logger.warning("Entity %s is too short for forecast mode, skipping", eid)
                 continue
 
@@ -125,6 +133,25 @@ class EventSequenceDataset(Dataset):
             mode,
             self.max_seq_len,
         )
+
+    def _format_forecast_targets(self, forecast_targets: dict) -> dict:
+        return {
+            "future_event_type_profile": torch.from_numpy(
+                forecast_targets["future_event_type_profile"]
+            ),
+            "future_count_bucket": torch.tensor(
+                forecast_targets["future_count_bucket"], dtype=torch.long
+            ),
+            "future_amount_stats": torch.from_numpy(
+                forecast_targets["future_amount_stats"]
+            ),
+            "future_gap_bucket": torch.tensor(
+                forecast_targets["future_gap_bucket"], dtype=torch.long
+            ),
+            "future_cat_profiles": [
+                torch.from_numpy(x) for x in forecast_targets["future_cat_profiles"]
+            ],
+        }
 
     def _get_window(self, n: int, mode: str) -> tuple[int, int]:
         """
@@ -177,29 +204,14 @@ class EventSequenceDataset(Dataset):
                 "attention_mask": torch.ones(L, dtype=torch.bool),
                 "label": torch.tensor(sample["label"], dtype=torch.long),
                 "entity_id": sample["entity_id"],
-                "forecast_targets": {
-                    "future_event_type_profile": torch.from_numpy(
-                        forecast_targets["future_event_type_profile"]
-                    ),
-                    "future_count_bucket": torch.tensor(
-                        forecast_targets["future_count_bucket"], dtype=torch.long
-                    ),
-                    "future_amount_stats": torch.from_numpy(
-                        forecast_targets["future_amount_stats"]
-                    ),
-                    "future_gap_bucket": torch.tensor(
-                        forecast_targets["future_gap_bucket"], dtype=torch.long
-                    ),
-                    "future_cat_profiles": [
-                        torch.from_numpy(x) for x in forecast_targets["future_cat_profiles"]
-                    ],
-                },
+                "forecast_targets": self._format_forecast_targets(forecast_targets),
+                "forecast_cut": torch.tensor(L, dtype=torch.long),
             }
 
         start, end = self._get_window(n, self.mode)
 
         L = end - start
-        return {
+        result = {
             "event_type": torch.from_numpy(sample["event_type"][start:end]),
             "time_delta": torch.from_numpy(sample["time_delta"][start:end]),
             "num_features": torch.from_numpy(sample["num"][start:end]),
@@ -208,3 +220,19 @@ class EventSequenceDataset(Dataset):
             "label": torch.tensor(sample["label"], dtype=torch.long),
             "entity_id": sample["entity_id"],
         }
+        if self.mode == "pretrain" and self._needs_forecast_targets:
+            cut = sample_forecast_cut(L, self.config)
+            window_sample = {
+                "event_type": sample["event_type"][start:end],
+                "time_delta": sample["time_delta"][start:end],
+                "num": sample["num"][start:end],
+                "cat": sample["cat"][start:end],
+            }
+            forecast_targets = make_forecast_targets(
+                window_sample,
+                cut,
+                self.forecast_stats,
+            )
+            result["forecast_targets"] = self._format_forecast_targets(forecast_targets)
+            result["forecast_cut"] = torch.tensor(cut, dtype=torch.long)
+        return result
