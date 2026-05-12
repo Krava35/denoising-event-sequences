@@ -1,0 +1,65 @@
+# A14: Final classification-oriented DME forecast pretraining.
+# Use this when the objective is downstream classification quality.
+# Diffusion/D3PM stay out of the final classification model because the
+# checked experiments showed direct forecast pretraining is stronger.
+
+pretraining:
+  objective: "denoising"
+
+d3pm:
+  enabled: false
+  use_prev_logits_for_sampling: false
+
+generation:
+  enabled: false
+
+model:
+  event_type_emb_dim: 64
+  cat_emb_dim: 32
+  num_projection_dim: 64
+  time_projection_dim: 64
+  hidden_dim: 256
+  num_layers: 4
+  num_heads: 8
+  dim_feedforward: 1024
+  dropout: 0.10
+  activation: "gelu"
+  max_seq_len: 256
+  use_profile_token: true
+  client_embedding_dim: 512
+
+pooling:
+  type: "multi"
+  components: ["profile", "gated_attention", "mean", "max", "last"]
+
+forecasting:
+  enabled: true
+  cut_min_ratio: 0.50
+  cut_max_ratio: 0.80
+  min_future_events: 2
+  event_type_target_mode: "log_future_global_ratio"
+  count_num_buckets: 6
+  gap_num_buckets: 6
+  alpha_forecast: 0.20
+  alpha_denoising: 0.20
+  lambda_event_type_profile: 1.0
+  lambda_count: 0.5
+  lambda_amount: 0.5
+  lambda_gap: 0.3
+  lambda_cat_profile: 0.5
+  pretrain_aux_enabled: false
+  finetune_aux_enabled: false
+
+loss_calibration:
+  enabled: true
+
+training:
+  batch_size: 256
+  num_epochs_pretrain: 100
+  num_epochs_finetune: 60
+  lr: 0.0003
+  lr_encoder: 0.00003
+  weight_decay: 0.01
+  warmup_ratio: 0.05
+  gradient_clip_val: 1.0
+  early_stopping_patience: 5

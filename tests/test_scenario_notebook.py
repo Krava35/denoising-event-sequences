@@ -122,3 +122,42 @@ def test_kaggle_final_forecast_diffusion_notebook_structure() -> None:
     ]
     for snippet in required_snippets:
         assert snippet in source
+
+
+def test_kaggle_final_forecast_pretrain_sweep_notebook_structure() -> None:
+    notebook_path = Path("notebooks/kaggle_final_forecast_pretrain_sweep.ipynb")
+    assert notebook_path.exists()
+
+    notebook = json.loads(notebook_path.read_text())
+    assert notebook["nbformat"] == 4
+
+    source = "\n".join(
+        "".join(cell.get("source", []))
+        for cell in notebook.get("cells", [])
+    )
+
+    required_snippets = [
+        "# Cell 1 - Setup & Install",
+        "# Cell 2 - Paths, Targets & Runtime Knobs",
+        "# Cell 3 - Final Forecast-Pretrain Config Sweep",
+        "# Cell 4 - Data Loading & Preprocessing Artifacts",
+        "# Cell 5 - Prepared Artifact Inspection",
+        "# Cell 6 - Forecast Hybrid Smoke Test",
+        "# Cell 7 - Forecast Pretraining Sweep",
+        "# Cell 8 - Fine-tuning Sweep",
+        "# Cell 9 - Compare Against Checked-In Results",
+        "# Cell 10 - Artifact Summary",
+        "A14_final_forecast_pretrain.yaml",
+        "forecast_repro",
+        "forecast_alpha015",
+        "forecast_alpha030",
+        "forecast_reg015",
+        "forecast_enc2e5",
+        "\"currency\"",
+        "RESULTS_DME_FULL_TARGET",
+        "scripts/forecast_pretrain.py",
+        "scripts/finetune.py",
+        "final_forecast_pretrain_vs_checked_in_results.csv",
+    ]
+    for snippet in required_snippets:
+        assert snippet in source
