@@ -49,14 +49,27 @@ def compute_classification_metrics(
             "balanced_accuracy": float(balanced_accuracy_score(y_true, y_pred)),
         }
     else:
+        classes = list(range(num_classes))
+        y_bin = label_binarize(y_true, classes=classes)
+        try:
+            roc_auc_ovr = float(
+                roc_auc_score(y_true, y_pred_proba, multi_class="ovr", average="macro")
+            )
+        except ValueError:
+            roc_auc_ovr = float("nan")
+        try:
+            macro_pr_auc = float(
+                average_precision_score(y_bin, y_pred_proba, average="macro")
+            )
+        except ValueError:
+            macro_pr_auc = float("nan")
         return {
             "accuracy": float(accuracy_score(y_true, y_pred)),
             "macro_f1": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
             "weighted_f1": float(f1_score(y_true, y_pred, average="weighted", zero_division=0)),
             "balanced_accuracy": float(balanced_accuracy_score(y_true, y_pred)),
-            "roc_auc_ovr": float(
-                roc_auc_score(y_true, y_pred_proba, multi_class="ovr", average="macro")
-            ),
+            "roc_auc_ovr": roc_auc_ovr,
+            "macro_pr_auc": macro_pr_auc,
         }
 
 

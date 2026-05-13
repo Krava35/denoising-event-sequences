@@ -232,3 +232,148 @@ def test_kaggle_catboost_baseline_notebook_structure() -> None:
     ]
     for snippet in required_snippets:
         assert snippet in source
+
+
+def test_public_benchmark_prepare_notebook_structure() -> None:
+    notebook_path = Path("notebooks/kaggle_prepare_gender_age_group_data.ipynb")
+    assert notebook_path.exists()
+
+    notebook = json.loads(notebook_path.read_text())
+    assert notebook["nbformat"] == 4
+
+    source = "\n".join(
+        "".join(cell.get("source", []))
+        for cell in notebook.get("cells", [])
+    )
+
+    required_snippets = [
+        "# Cell 1 - Setup & Install",
+        "# Cell 2 - Dataset Selection",
+        "# Cell 3 - Run Preparation Script",
+        "# Cell 4 - Inspect Artifacts and Split Balance",
+        "# Cell 5 - Artifact Summary",
+        "prepare_public_benchmark_data.py",
+        "DATASETS_TO_PREPARE = [\"gender\", \"age_group\"]",
+        "official hidden/public test files are ignored",
+        "canonical_events.parquet",
+        "prepared_config.yaml",
+    ]
+    for snippet in required_snippets:
+        assert snippet in source
+
+
+def test_public_benchmark_catboost_notebook_structure() -> None:
+    notebook_path = Path("notebooks/kaggle_baseline_aggregates_catboost_public_benchmarks.ipynb")
+    assert notebook_path.exists()
+
+    notebook = json.loads(notebook_path.read_text())
+    assert notebook["nbformat"] == 4
+
+    source = "\n".join(
+        "".join(cell.get("source", []))
+        for cell in notebook.get("cells", [])
+    )
+
+    required_snippets = [
+        "DATASET_NAME = \"gender\"",
+        "prepare_public_benchmark_data.py",
+        "CATBOOST_CATEGORICAL_FEATURES",
+        "CATBOOST_FITTED_FEATURE_METADATA",
+        "assert_no_future_leakage",
+        "assert_catboost_feature_frame_is_leak_safe",
+        "recency_weighted",
+        "Pool(",
+        "cat_features=cat_feature_names",
+        "bootstrap_type=\"Bayesian\"",
+        "catboost_agg_metrics.json",
+    ]
+    for snippet in required_snippets:
+        assert snippet in source
+
+
+def test_public_benchmark_coles_notebook_structure() -> None:
+    notebook_path = Path("notebooks/kaggle_baseline_coles_public_benchmarks.ipynb")
+    assert notebook_path.exists()
+
+    notebook = json.loads(notebook_path.read_text())
+    assert notebook["nbformat"] == 4
+
+    source = "\n".join(
+        "".join(cell.get("source", []))
+        for cell in notebook.get("cells", [])
+    )
+
+    required_snippets = [
+        "COLES_ARTICLE_LIKE_PREP = True",
+        "COLES_PRETRAIN_ENTITY_SCOPE = \"train_prefix_only\"",
+        "COLES_DOWNSTREAM_MODES = [\"classification_head\", \"full_finetune\", \"catboost\"]",
+        "sample_article_like_slice",
+        "manual_article_like_multi_slice",
+        "assert_no_future_leakage",
+        "CoLESClassifier",
+        "make_class_weights",
+        "extract_coles_embeddings",
+        "train_coles_catboost",
+        "CatBoostClassifier",
+        "coles_classification_head",
+        "coles_full_finetune",
+        "coles_catboost",
+        "coles_catboost_feature_importance.csv",
+    ]
+    for snippet in required_snippets:
+        assert snippet in source
+
+
+def test_public_benchmark_supervised_encoder_notebook_structure() -> None:
+    notebook_path = Path("notebooks/kaggle_baseline_supervised_encoder_public_benchmarks.ipynb")
+    assert notebook_path.exists()
+
+    notebook = json.loads(notebook_path.read_text())
+    assert notebook["nbformat"] == 4
+
+    source = "\n".join(
+        "".join(cell.get("source", []))
+        for cell in notebook.get("cells", [])
+    )
+
+    required_snippets = [
+        "SUPERVISED_ENCODER_EXPERIMENTS",
+        "supervised_full",
+        "supervised_low_10pct",
+        "scripts\" / \"finetune.py",
+        "--label-fraction",
+        "selection_metric",
+        "supervised_encoder_metrics.csv",
+    ]
+    for snippet in required_snippets:
+        assert snippet in source
+
+
+def test_public_benchmark_final_dme_notebook_structure() -> None:
+    notebook_path = Path("notebooks/kaggle_final_dme_public_benchmarks.ipynb")
+    assert notebook_path.exists()
+
+    notebook = json.loads(notebook_path.read_text())
+    assert notebook["nbformat"] == 4
+
+    source = "\n".join(
+        "".join(cell.get("source", []))
+        for cell in notebook.get("cells", [])
+    )
+
+    required_snippets = [
+        "FINAL_DME_ABLATION_PATH",
+        "A14_final_forecast_pretrain.yaml",
+        "FINAL_DME_PUBLIC_EXPERIMENTS",
+        "forecast_alpha030_reg012",
+        "forecast_alpha030_reg015",
+        "scripts\" / \"forecast_pretrain.py",
+        "scripts\" / \"finetune.py",
+        "best_forecast_checkpoint.pt",
+        "forecast_eval_metrics.json",
+        "scenario_examples.json",
+        "final_dme_metrics.csv",
+        "final_dme_forecast_metrics.csv",
+    ]
+    for snippet in required_snippets:
+        assert snippet in source
