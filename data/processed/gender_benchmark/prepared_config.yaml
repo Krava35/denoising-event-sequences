@@ -1,0 +1,186 @@
+_metadata:
+  saved_at: '2026-05-13T21:52:47.353837+00:00'
+project:
+  name: denoising-event-sequences
+  model_name: DME-Encoder
+  task: sequence_classification
+seed:
+  global_seed: 42
+pretraining:
+  objective: denoising
+data:
+  max_seq_len: 512
+  min_seq_len: 5
+  event_type_col: mcc_code
+  timestamp_col: event_timestamp
+  target_col: gender
+  numerical_cols:
+  - amount
+  categorical_cols:
+  - tr_type
+  - term_id
+  group_col: customer_id
+  truncation_pretrain: sliding_window
+  truncation_eval: last_events
+  amount_transform: sign_log1p
+  amount_cols:
+  - amount
+  robust_scale_cols:
+  - amount
+  use_time_features: false
+  time_feature_mode: derived_numeric
+  train_ratio: 0.7
+  val_ratio: 0.15
+  test_ratio: 0.15
+  time_transform: log1p
+corruption:
+  dynamic_in_training_loop: true
+  event_type:
+    selected_prob: 0.4
+    mask_prob: 0.28
+    transition_replace_prob: 0.0
+    random_replace_prob: 0.1
+    keep_predict_prob: 0.02
+    use_transition_aware_replacement: false
+  transition_matrix:
+    build_from: train_split_only
+    artifact_path: data/processed/transition_matrix.npy
+    metadata_path: data/processed/transition_matrix_meta.json
+    frozen_during_training: true
+    smoothing_alpha: 0.1
+    min_transition_count: 5
+    fallback: frequency_aware
+  time_noise:
+    corruption_prob: 0.3
+    min_std: 0.05
+    max_std: 0.3
+    sampling_level: batch
+  numerical_noise:
+    corruption_prob: 0.2
+    min_std: 0.03
+    max_std: 0.15
+    sampling_level: batch
+  categorical_features:
+    mask_prob: 0.15
+    random_replace_prob: 0.05
+  event_level_masking:
+    prob: 0.1
+diffusion:
+  num_steps: 100
+  timestep_sampling: uniform
+  beta_start: 0.0001
+  beta_end: 0.02
+  discrete_mask_fraction: 0.8
+d3pm:
+  enabled: false
+  apply_to:
+  - event_type
+  transition: absorbing_uniform
+  loss_weight_event_type_prev: 0.25
+  use_prev_logits_for_sampling: true
+generation:
+  enabled: false
+  mode: conditional_suffix
+  suffix_len: 16
+  prefix_min_ratio: 0.5
+  prefix_max_ratio: 0.8
+  sampler: ddim_lite
+  num_sampling_steps: 50
+  temperature_event_type: 1.0
+  temperature_cat: 1.0
+  top_k_event_type: 20
+  continuous_update: x0_eps_blend
+model:
+  event_type_emb_dim: 64
+  cat_emb_dim: 32
+  num_projection_dim: 64
+  time_projection_dim: 64
+  hidden_dim: 256
+  num_layers: 4
+  num_heads: 8
+  dim_feedforward: 1024
+  dropout: 0.1
+  activation: gelu
+  backbone: transformer
+  max_seq_len: 256
+  use_profile_token: false
+  client_embedding_dim: 512
+pooling:
+  type: gated_attention
+  components:
+  - profile
+  - gated_attention
+  - mean
+  - max
+  - last
+forecasting:
+  enabled: false
+  cut_min_ratio: 0.5
+  cut_max_ratio: 0.8
+  min_future_events: 2
+  event_type_target_mode: log_future_global_ratio
+  count_num_buckets: 6
+  gap_num_buckets: 6
+  alpha_forecast: 0.2
+  lambda_event_type_profile: 1.0
+  lambda_count: 0.5
+  lambda_amount: 0.5
+  lambda_gap: 0.3
+  lambda_cat_profile: 0.5
+  pretrain_aux_enabled: false
+  pretrain_aux_weight: 0.03
+  finetune_aux_enabled: false
+  finetune_aux_weight: 0.05
+loss:
+  lambda_event_type: 1.0
+  lambda_time: 1.0
+  lambda_num: 0.5
+  lambda_cat: 0.5
+  lambda_exist: 0.1
+  lambda_time_eps: 0.1
+  lambda_num_eps: 0.1
+loss_calibration:
+  enabled: true
+  warmup_steps: 1000
+  log_components: true
+  freeze_lambdas_after_warmup: true
+training:
+  task: binary
+  main_metrics:
+  - roc_auc
+  - pr_auc
+  - macro_f1
+  batch_size: 128
+  num_epochs_pretrain: 30
+  num_epochs_finetune: 20
+  lr: 0.0003
+  lr_encoder: 3.0e-05
+  weight_decay: 0.01
+  warmup_ratio: 0.05
+  gradient_clip_val: 1.0
+  mixed_precision: false
+  early_stopping_patience: 5
+  checkpoint_every_n_steps: 500
+  log_every_n_steps: 50
+  num_classes: 2
+  selection_metric: roc_auc
+low_label_protocol:
+  label_fractions:
+  - 0.01
+  - 0.05
+  - 0.1
+  - 0.25
+  - 0.5
+  - 1.0
+  label_sampling_seeds:
+  - 42
+  - 43
+  - 44
+  model_init_seeds:
+  - 42
+_dataset: gender
+_description: 'Gender prediction. Binary. Long sequences (median=324, p95=1089). Amount
+  is mostly negative (expenses, 80.9%) → sign*log1p required. time_delta has heavy
+  tail (mean/median >> 3x) → log1p_time=True.
+
+  '
