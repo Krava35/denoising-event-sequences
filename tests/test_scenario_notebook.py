@@ -146,7 +146,8 @@ def test_kaggle_final_forecast_pretrain_sweep_notebook_structure() -> None:
         "# Cell 7 - Forecast Pretraining Sweep",
         "# Cell 8 - Fine-tuning Sweep",
         "# Cell 9 - Compare Against Checked-In Results",
-        "# Cell 10 - Artifact Summary",
+        "# Cell 10 - Forecast Scenario Generation Check",
+        "# Cell 11 - Artifact Summary",
         "A14_final_forecast_pretrain.yaml",
         "forecast_repro",
         "forecast_alpha015",
@@ -157,7 +158,77 @@ def test_kaggle_final_forecast_pretrain_sweep_notebook_structure() -> None:
         "RESULTS_DME_FULL_TARGET",
         "scripts/forecast_pretrain.py",
         "scripts/finetune.py",
+        "forecast_eval_metrics",
+        "scenario_examples",
+        "best_forecast_generation_metrics.csv",
+        "best_forecast_scenario_examples.csv",
         "final_forecast_pretrain_vs_checked_in_results.csv",
+    ]
+    for snippet in required_snippets:
+        assert snippet in source
+
+
+def test_kaggle_coles_baseline_notebook_structure() -> None:
+    notebook_path = Path("notebooks/kaggle_baseline_coles_ptls.ipynb")
+    assert notebook_path.exists()
+
+    notebook = json.loads(notebook_path.read_text())
+    assert notebook["nbformat"] == 4
+
+    source = "\n".join(
+        "".join(cell.get("source", []))
+        for cell in notebook.get("cells", [])
+    )
+
+    required_snippets = [
+        "COLES_ARTICLE_LIKE_PREP = True",
+        'COLES_PRETRAIN_ENTITY_SCOPE = "train_prefix_only"',
+        'COLES_DOWNSTREAM_MODES = ["classification_head", "full_finetune", "catboost"]',
+        "sample_article_like_slice",
+        "manual_article_like_multi_slice",
+        "assert_no_future_leakage",
+        "CoLESClassifier",
+        "make_class_weights",
+        "extract_coles_embeddings",
+        "train_coles_catboost",
+        "CatBoostClassifier",
+        "Pool(",
+        "coles_classification_head",
+        "coles_full_finetune",
+        "coles_catboost",
+        "coles_catboost_feature_importance.csv",
+    ]
+    for snippet in required_snippets:
+        assert snippet in source
+
+
+def test_kaggle_catboost_baseline_notebook_structure() -> None:
+    notebook_path = Path("notebooks/kaggle_baseline_aggregates_catboost.ipynb")
+    assert notebook_path.exists()
+
+    notebook = json.loads(notebook_path.read_text())
+    assert notebook["nbformat"] == 4
+
+    source = "\n".join(
+        "".join(cell.get("source", []))
+        for cell in notebook.get("cells", [])
+    )
+
+    required_snippets = [
+        "CATBOOST_CATEGORICAL_FEATURES",
+        "CATBOOST_FITTED_FEATURE_METADATA",
+        "assert_catboost_feature_frame_is_leak_safe",
+        "assert_no_future_leakage",
+        "first_",
+        "last_",
+        "mode_",
+        "recency_weighted",
+        "Pool(",
+        "cat_features=cat_feature_names",
+        'iterations = 100 if SMOKE_RUN else 3000',
+        'learning_rate=0.025',
+        'bootstrap_type="Bayesian"',
+        '"feature_metadata": CATBOOST_FITTED_FEATURE_METADATA',
     ]
     for snippet in required_snippets:
         assert snippet in source
