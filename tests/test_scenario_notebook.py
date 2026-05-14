@@ -256,6 +256,7 @@ def test_public_benchmark_prepare_notebook_structure() -> None:
         "DATASETS_TO_PREPARE = [\"gender\", \"age_group\"]",
         "official hidden/public test files are ignored",
         "canonical_events.parquet",
+        "transformed_events.parquet",
         "prepared_config.yaml",
     ]
     for snippet in required_snippets:
@@ -285,6 +286,8 @@ def test_public_benchmark_catboost_notebook_structure() -> None:
         "Pool(",
         "cat_features=cat_feature_names",
         "bootstrap_type=\"Bayesian\"",
+        "events_are_raw_pretransform",
+        "transformed_events.parquet",
         "catboost_agg_metrics.json",
     ]
     for snippet in required_snippets:
@@ -307,6 +310,8 @@ def test_public_benchmark_coles_notebook_structure() -> None:
         "COLES_ARTICLE_LIKE_PREP = True",
         "COLES_PRETRAIN_ENTITY_SCOPE = \"train_prefix_only\"",
         "COLES_DOWNSTREAM_MODES = [\"classification_head\", \"full_finetune\", \"catboost\"]",
+        "events_are_raw_pretransform",
+        "transformed_events.parquet",
         "sample_article_like_slice",
         "manual_article_like_multi_slice",
         "assert_no_future_leakage",
@@ -338,11 +343,15 @@ def test_public_benchmark_supervised_encoder_notebook_structure() -> None:
 
     required_snippets = [
         "SUPERVISED_ENCODER_EXPERIMENTS",
+        "pip\", \"install\", \"torchmetrics\"",
+        "events_are_raw_pretransform",
+        "transformed_events.parquet",
         "supervised_full",
         "supervised_low_10pct",
         "scripts\" / \"finetune.py",
         "--label-fraction",
         "selection_metric",
+        "runtime_base[\"model\"][\"max_seq_len\"] = runtime_base[\"data\"][\"max_seq_len\"]",
         "supervised_encoder_metrics.csv",
     ]
     for snippet in required_snippets:
@@ -363,12 +372,16 @@ def test_public_benchmark_final_dme_notebook_structure() -> None:
 
     required_snippets = [
         "FINAL_DME_ABLATION_PATH",
+        "pip\", \"install\", \"torchmetrics\"",
+        "events_are_raw_pretransform",
+        "transformed_events.parquet",
         "A14_final_forecast_pretrain.yaml",
         "FINAL_DME_PUBLIC_EXPERIMENTS",
         "forecast_alpha030_reg012",
         "forecast_alpha030_reg015",
         "scripts\" / \"forecast_pretrain.py",
         "scripts\" / \"finetune.py",
+        "cfg[\"model\"][\"max_seq_len\"] = cfg[\"data\"][\"max_seq_len\"]",
         "best_forecast_checkpoint.pt",
         "forecast_eval_metrics.json",
         "scenario_examples.json",

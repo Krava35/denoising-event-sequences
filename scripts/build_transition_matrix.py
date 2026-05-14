@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import pickle
 import sys
 from pathlib import Path
 from typing import Any
@@ -80,13 +81,35 @@ def _resolve_params(args: argparse.Namespace, config: dict[str, Any]) -> dict[st
     }
 
 
+def _load_preprocessor(path: Path | None):
+    if path is None or not path.exists():
+        return None
+    with path.open("rb") as f:
+        return pickle.load(f)
+
+
+def _encode_event_type_values(events: pd.DataFrame, event_type_col: str, preprocessor) -> pd.Series:
+    if preprocessor is None:
+        event_ids = events[event_type_col]
+        if event_ids.isna().any():
+            raise ValueError(f"Column '{event_type_col}' contains NaN in train events")
+        return event_ids.astype("int64")
+
+    vocab = preprocessor.vocab.get(preprocessor.event_type_col, {})
+    if not vocab:
+        raise ValueError("preprocessor has no event_type vocabulary")
+    unk = int(getattr(preprocessor, "UNK", 1))
+    return events[event_type_col].astype(str).map(lambda x: vocab.get(x, unk)).astype("int64")
+
+
 def _load_train_sequences(
     events_path: Path,
     splits_path: Path,
     event_type_col: str,
     entity_col: str,
     timestamp_col: str,
-) -> list[list[int]]:
+    preprocessor_path: Path | None,
+) -> tuple[list[list[int]], int | None]:
     if not events_path.exists():
         raise FileNotFoundError(f"events.parquet not found: {events_path}")
     if not splits_path.exists():
@@ -113,15 +136,23 @@ def _load_train_sequences(
         sort_cols.append(timestamp_col)
     train_events = train_events.sort_values(sort_cols, kind="stable")
 
-    if train_events[event_type_col].isna().any():
-        raise ValueError(f"Column '{event_type_col}' contains NaN in train events")
-
-    event_ids = train_events[event_type_col].to_numpy(dtype="int64")
-    if event_ids.min() < 0:
+    preprocessor = _load_preprocessor(preprocessor_path)
+    train_events["_event_type_id"] = _encode_event_type_values(
+        train_events,
+        event_type_col=event_type_col,
+        preprocessor=preprocessor,
+    )
+    event_ids = train_events["_event_type_id"].to_numpy(dtype="int64")
+    if len(event_ids) and event_ids.min() < 0:
         raise ValueError("event_type ids must be non-negative")
 
-    grouped = train_events.groupby(entity_col, sort=False)[event_type_col]
-    return [series.astype("int64").tolist() for _, series in grouped]
+    grouped = train_events.groupby(entity_col, sort=False)["_event_type_id"]
+    vocab_size = (
+        len(preprocessor.vocab.get(preprocessor.event_type_col, {}))
+        if preprocessor is not None
+        else None
+    )
+    return [series.astype("int64").tolist() for _, series in grouped], vocab_size
 
 
 def main() -> None:
@@ -130,6 +161,7 @@ def main() -> None:
     parser.add_argument("--processed-dir", default="data/processed")
     parser.add_argument("--events-path", default=None)
     parser.add_argument("--splits-path", default=None)
+    parser.add_argument("--preprocessor-path", default=None)
     parser.add_argument("--output-npy", default=None)
     parser.add_argument("--output-meta", default=None)
     parser.add_argument("--event-type-col", default=None)
@@ -144,18 +176,25 @@ def main() -> None:
     paths = _resolve_paths(args, config)
     params = _resolve_params(args, config)
 
-    train_sequences = _load_train_sequences(
+    preprocessor_path = (
+        Path(args.preprocessor_path)
+        if args.preprocessor_path is not None
+        else paths["events_path"].parent / "preprocessor.pkl"
+    )
+
+    train_sequences, preprocessor_vocab_size = _load_train_sequences(
         events_path=paths["events_path"],
         splits_path=paths["splits_path"],
         event_type_col=params["event_type_col"],
         entity_col=params["entity_col"],
         timestamp_col=params["timestamp_col"],
+        preprocessor_path=preprocessor_path,
     )
 
     if not train_sequences:
         raise ValueError("No train sequences were built from train events")
 
-    vocab_size = 1 + max(max(seq) for seq in train_sequences if seq)
+    vocab_size = preprocessor_vocab_size or 1 + max(max(seq) for seq in train_sequences if seq)
     matrix = TransitionMatrix(
         vocab_size=vocab_size,
         smoothing_alpha=float(params["smoothing_alpha"]),

@@ -237,6 +237,13 @@ def build_public_benchmark_config(
     )
     config["data"]["timestamp_col"] = "event_timestamp"
     config["data"]["max_seq_len"] = int(max_seq_len)
+    config["model"]["max_seq_len"] = int(max_seq_len)
+    if dataset_name == "gender":
+        # `term_id` is very high-cardinality in the public gender benchmark.
+        # Reconstructing it creates [B, L, |term_id_vocab|] logits and easily OOMs
+        # on 40GB GPUs. Keep it in canonical_events.parquet for external baselines,
+        # but exclude it from DME categorical reconstruction.
+        config["data"]["categorical_cols"] = ["tr_type"]
     config["training"]["num_classes"] = 2 if dataset_name == "gender" else 4
     config["training"]["task"] = "binary" if dataset_name == "gender" else "multiclass"
     config["training"]["selection_metric"] = "roc_auc" if dataset_name == "gender" else "macro_f1"
@@ -363,10 +370,18 @@ def prepare_public_benchmark_dataset(
     )
     save_splits(splits, out_dir / "splits.json")
 
+    # Training/evaluation scripts pass events.parquet back through EventSequenceDataset,
+    # and EventSequenceDataset applies the fitted preprocessor internally. Keep
+    # events.parquet as canonical raw events to avoid double-transforming vocab ids
+    # and continuous features.
+    events_path = out_dir / "events.parquet"
+    df.to_parquet(events_path, index=False)
+
     preprocessor = EventPreprocessor(config)
     preprocessor.fit(df, splits["train"])
     transformed = preprocessor.transform(df)
-    transformed.to_parquet(out_dir / "events.parquet", index=False)
+    transformed_path = out_dir / "transformed_events.parquet"
+    transformed.to_parquet(transformed_path, index=False)
 
     with (out_dir / "preprocessor.pkl").open("wb") as f:
         pickle.dump(preprocessor, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -374,6 +389,8 @@ def prepare_public_benchmark_dataset(
     save_config(config, str(out_dir / "prepared_config.yaml"))
 
     report["output_dir"] = str(out_dir)
+    report["events_are_raw_pretransform"] = True
+    report["transformed_events_path"] = str(transformed_path)
     report["split_sizes"] = {name: len(ids) for name, ids in splits.items()}
     report["event_type_vocab_size"] = len(preprocessor.vocab.get(preprocessor.event_type_col, {}))
     report["categorical_vocab_sizes"] = {
