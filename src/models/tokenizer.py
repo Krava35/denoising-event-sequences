@@ -18,15 +18,22 @@ class MixedEventTokenizer(nn.Module):
         max_seq_len: int = 256,
         dropout: float = 0.1,
         pad_token_id: int = 0,
+        use_profile_token: bool = False,
     ) -> None:
         super().__init__()
         cat_vocab_sizes = cat_vocab_sizes or []
 
         self.hidden_dim = hidden_dim
         self.pad_token_id = pad_token_id
+        self.use_profile_token = use_profile_token
 
         self.event_type_embedding = nn.Embedding(event_type_vocab_size, event_type_emb_dim)
-        self.position_embedding = nn.Embedding(max_seq_len, hidden_dim)
+        self.position_embedding = nn.Embedding(
+            max_seq_len + (1 if use_profile_token else 0), hidden_dim
+        )
+        self.profile_token = (
+            nn.Parameter(torch.zeros(1, 1, hidden_dim)) if use_profile_token else None
+        )
         self.time_projection = nn.Sequential(nn.Linear(1, time_projection_dim), nn.GELU())
 
         if num_num_features > 0:
@@ -56,19 +63,15 @@ class MixedEventTokenizer(nn.Module):
         num_features: torch.FloatTensor | None = None,  # [B, L, N]
         cat_features: torch.LongTensor | None = None,   # [B, L, C]
         attention_mask: torch.BoolTensor | None = None, # [B, L]
-    ) -> torch.FloatTensor:                         # [B, L, hidden_dim]
+    ) -> torch.FloatTensor:                         # [B, L(+1), hidden_dim]
         B, L = event_type.shape
 
         # [B, L, event_type_emb_dim]
         event_type_emb = self.event_type_embedding(event_type)
 
-        # [B, L, 1] → [B, L, time_projection_dim]
-        log_time = torch.log1p(time_delta.clamp(min=0)).unsqueeze(-1)
-        time_emb = self.time_projection(log_time)
-
-        # [1, L, hidden_dim] — добавляется после проекции
-        positions = torch.arange(L, device=event_type.device)
-        pos_emb = self.position_embedding(positions).unsqueeze(0)
+        # time_delta is already transformed and scaled by EventPreprocessor.
+        # Do not clamp/log it again: robust-scaled values can be negative.
+        time_emb = self.time_projection(time_delta.unsqueeze(-1))
 
         components: list[torch.Tensor] = [event_type_emb, time_emb]
 
@@ -86,16 +89,33 @@ class MixedEventTokenizer(nn.Module):
 
         # [B, L, hidden_dim]
         x = self.output_projection(x)
-        x = x + pos_emb
+
+        if self.use_profile_token:
+            event_positions = torch.arange(1, L + 1, device=event_type.device)
+            event_pos_emb = self.position_embedding(event_positions).unsqueeze(0)
+            profile_pos_emb = self.position_embedding(
+                torch.zeros(1, dtype=torch.long, device=event_type.device)
+            ).unsqueeze(0)
+            profile = self.profile_token.expand(B, 1, self.hidden_dim) + profile_pos_emb
+            x = torch.cat([profile, x + event_pos_emb], dim=1)
+        else:
+            positions = torch.arange(L, device=event_type.device)
+            pos_emb = self.position_embedding(positions).unsqueeze(0)
+            x = x + pos_emb
 
         x = self.layer_norm(x)
         x = self.dropout(x)
 
         if attention_mask is not None:
-            # [B, L, 1] → обнулить паддинг-позиции
+            if self.use_profile_token:
+                profile_mask = torch.ones(
+                    B, 1, dtype=attention_mask.dtype, device=attention_mask.device
+                )
+                attention_mask = torch.cat([profile_mask, attention_mask], dim=1)
             x = x * attention_mask.unsqueeze(-1).float()
 
-        assert x.shape == (B, L, self.hidden_dim), (
-            f"Expected ({B}, {L}, {self.hidden_dim}), got {x.shape}"
+        expected_len = L + (1 if self.use_profile_token else 0)
+        assert x.shape == (B, expected_len, self.hidden_dim), (
+            f"Expected ({B}, {expected_len}, {self.hidden_dim}), got {x.shape}"
         )
         return x

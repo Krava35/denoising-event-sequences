@@ -26,6 +26,53 @@ _LOSS_KEY_TO_LAMBDA = {
 _CAL_COMPONENTS = list(_LOSS_KEY_TO_LAMBDA.keys())
 
 
+def _compute_calibration_recommendations(
+    component_sums: dict[str, float],
+    warmup_steps: int,
+    config: dict,
+) -> tuple[dict[str, float], dict[str, float], float]:
+    """Compute mean component losses and lambda weights for loss calibration."""
+    means = {k: component_sums[k] / max(1, warmup_steps) for k in _CAL_COMPONENTS}
+    ref = means.get("event_type") or 1.0
+    nonzero = [v for v in means.values() if v > 0]
+    max_min_ratio = (max(nonzero) / min(nonzero)) if len(nonzero) >= 2 else 1.0
+
+    recommended = {
+        _LOSS_KEY_TO_LAMBDA[k]: ref / max(v, 1e-8)
+        for k, v in means.items()
+    }
+
+    return means, recommended, max_min_ratio
+
+
+def _log_calibration_recommendations(
+    component_sums: dict[str, float],
+    warmup_steps: int,
+    config: dict,
+) -> dict[str, float]:
+    """Print recommended lambda weights for notebook-driven loss calibration."""
+    means, recommended, max_min_ratio = _compute_calibration_recommendations(
+        component_sums, warmup_steps, config
+    )
+    loss_cfg = config.get("loss", {})
+
+    print("\n=== Loss Calibration ===")
+    for k, v in means.items():
+        lk = _LOSS_KEY_TO_LAMBDA[k]
+        print(
+            f"  {k:<16}: mean={v:.6f}  rec_λ={recommended[lk]:.4f}  "
+            f"cur_λ={loss_cfg.get(lk, '—')}"
+        )
+    print(f"  max/min ratio: {max_min_ratio:.1f}x")
+    if max_min_ratio > 5.0:
+        print("  Recommendation: apply calibrated lambdas before main pretraining.")
+    else:
+        print("  Recommendation: current lambdas are reasonably balanced.")
+    print("=======================\n")
+
+    return recommended
+
+
 def _batch_to_device(batch: dict, device: torch.device) -> dict:
     return {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
 
@@ -62,16 +109,10 @@ def _apply_calibration(
     """Auto-apply λ-weights if max/min ratio > 5×. Returns (possibly updated) config copy."""
     import json as _json
 
-    means = {k: component_sums[k] / max(1, warmup_steps) for k in _CAL_COMPONENTS}
-    ref = means.get("event_type") or 1.0
-    nonzero = [v for v in means.values() if v > 0]
-    max_min_ratio = (max(nonzero) / min(nonzero)) if len(nonzero) >= 2 else 1.0
-
+    means, recommended, max_min_ratio = _compute_calibration_recommendations(
+        component_sums, warmup_steps, config
+    )
     loss_cfg = config.get("loss", {})
-    recommended = {
-        _LOSS_KEY_TO_LAMBDA[k]: ref / max(v, 1e-8)
-        for k, v in means.items()
-    }
 
     print("\n=== Loss Calibration ===")
     for k, v in means.items():

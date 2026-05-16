@@ -20,6 +20,8 @@ data:
   amount_transform: "robust_scaler"       # robust_scaler | sign_log1p | log1p
   amount_cols: []
   robust_scale_cols: []
+  use_time_features: false
+  time_feature_mode: "derived_numeric"
   train_ratio: 0.70
   val_ratio: 0.15
   test_ratio: 0.15
@@ -92,9 +94,29 @@ model:
   activation: "gelu"
   backbone: "transformer"   # transformer | hybrid_ssm_transformer
   max_seq_len: 256
+  use_profile_token: false
+  client_embedding_dim: 512
 
 pooling:
-  type: "gated_attention"   # cls | mean | max | attention | gated_attention
+  type: "gated_attention"   # cls | mean | max | attention | gated_attention | multi
+  components: ["profile", "gated_attention", "mean", "max", "last"]
+
+forecasting:
+  enabled: false
+  cut_min_ratio: 0.50
+  cut_max_ratio: 0.80
+  min_future_events: 2
+  event_type_target_mode: "log_future_global_ratio"
+  count_num_buckets: 6
+  gap_num_buckets: 6
+  alpha_forecast: 0.2
+  lambda_event_type_profile: 1.0
+  lambda_count: 0.5
+  lambda_amount: 0.5
+  lambda_gap: 0.3
+  lambda_cat_profile: 0.5
+  finetune_aux_enabled: false
+  finetune_aux_weight: 0.05
 
 # ── Loss ──────────────────────────────────────────────────────────────────────
 loss:

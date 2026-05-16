@@ -19,11 +19,27 @@ class MetricsLogger:
         with self._metrics_path.open("a") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
+    @property
+    def metrics_path(self) -> Path:
+        return self._metrics_path
+
+    @staticmethod
+    def _format_metrics(metrics: dict) -> str:
+        parts: list[str] = []
+        for key, value in metrics.items():
+            if isinstance(value, float):
+                parts.append(f"{key}={value:.6g}")
+            else:
+                parts.append(f"{key}={value}")
+        return " ".join(parts)
+
     def log_step(self, step: int, metrics: dict) -> None:
         self._write({"step": step, **metrics})
+        logger.info("step=%s %s", step, self._format_metrics(metrics))
 
     def log_epoch(self, epoch: int, metrics: dict) -> None:
         self._write({"epoch": epoch, **metrics})
+        logger.info("epoch=%s %s", epoch, self._format_metrics(metrics))
 
     def log_config(self, config: dict) -> None:
         path = self._dir / "config_snapshot.json"

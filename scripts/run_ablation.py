@@ -26,6 +26,7 @@ from src.corruption.pipeline import CorruptionPipeline
 from src.corruption.transition_matrix import TransitionMatrix
 from src.data.collate import collate_fn
 from src.data.dataset import EventSequenceDataset
+from src.data.forecasting import get_num_feature_dim
 from src.data.splits import load_splits
 from src.evaluation.classification import compute_classification_metrics
 from src.models.dme_encoder import DMEEncoder
@@ -104,7 +105,7 @@ def _build_vocab_info(preprocessor, config: dict) -> dict:
         "cat_vocab_sizes": [
             len(preprocessor.vocab.get(col, {})) for col in preprocessor.categorical_cols
         ],
-        "num_num_features": len(preprocessor.numerical_cols),
+        "num_num_features": get_num_feature_dim(preprocessor, config),
         "num_classes": int(config.get("training", {}).get("num_classes", 2)),
     }
 
@@ -198,6 +199,7 @@ def _run_one_ablation(
                 "event_type": vocab_info["event_type_vocab_size"],
                 "cat_features": vocab_info["cat_vocab_sizes"],
             },
+            time_transform=config.get("data", {}).get("time_transform", "log1p"),
         )
         model = DMEEncoder(config, vocab_info)
         pretrain_train, pretrain_val, _ = _build_loaders(

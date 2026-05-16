@@ -9,6 +9,15 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
+from src.data.forecasting import (
+    build_forecast_stats,
+    compute_derived_time_features,
+    get_derived_time_feature_names,
+    has_valid_forecast_cut,
+    make_forecast_targets,
+    sample_forecast_cut,
+)
+
 if TYPE_CHECKING:
     from src.data.preprocessing import EventPreprocessor
 
@@ -23,15 +32,22 @@ class EventSequenceDataset(Dataset):
         preprocessor: EventPreprocessor,
         config: dict,
         mode: str = "pretrain",
+        forecast_stats: dict | None = None,
     ) -> None:
-        if mode not in ("pretrain", "finetune", "eval"):
-            raise ValueError(f"mode must be pretrain|finetune|eval, got '{mode}'")
+        if mode not in ("pretrain", "finetune", "eval", "forecast"):
+            raise ValueError(f"mode must be pretrain|finetune|eval|forecast, got '{mode}'")
 
         self.config = config
 
         data_cfg = config.get("data", {})
         self.max_seq_len: int = int(data_cfg.get("max_seq_len", 256))
         self.mode = mode
+        self._time_feature_names = get_derived_time_feature_names(config)
+        self.forecast_stats = (
+            forecast_stats
+            if forecast_stats is not None or mode != "forecast"
+            else build_forecast_stats(df_events, entity_ids, preprocessor, config)
+        )
 
         target_col: str = data_cfg.get("target_col", "target")
         entity_col: str = preprocessor.entity_col
@@ -78,11 +94,19 @@ class EventSequenceDataset(Dataset):
                 if num_cols
                 else np.empty((N, 0), dtype=np.float32)
             )
+            if self._time_feature_names:
+                time_features = compute_derived_time_features(ent["_tc"])
+                num = np.concatenate([num, time_features], axis=1)
+
             cat = (
                 ent[cat_cols].to_numpy(dtype=np.int64)
                 if cat_cols
                 else np.empty((N, 0), dtype=np.int64)
             )
+
+            if mode == "forecast" and not has_valid_forecast_cut(N, config):
+                logger.warning("Entity %s is too short for forecast mode, skipping", eid)
+                continue
 
             self._samples.append(
                 {
@@ -138,6 +162,40 @@ class EventSequenceDataset(Dataset):
     def __getitem__(self, idx: int) -> dict:
         sample = self._samples[idx]
         n = len(sample["event_type"])
+
+        if self.mode == "forecast":
+            cut = sample_forecast_cut(n, self.config)
+            start = max(0, cut - self.max_seq_len)
+            end = cut
+            forecast_targets = make_forecast_targets(sample, cut, self.forecast_stats)
+            L = end - start
+            return {
+                "event_type": torch.from_numpy(sample["event_type"][start:end]),
+                "time_delta": torch.from_numpy(sample["time_delta"][start:end]),
+                "num_features": torch.from_numpy(sample["num"][start:end]),
+                "cat_features": torch.from_numpy(sample["cat"][start:end]),
+                "attention_mask": torch.ones(L, dtype=torch.bool),
+                "label": torch.tensor(sample["label"], dtype=torch.long),
+                "entity_id": sample["entity_id"],
+                "forecast_targets": {
+                    "future_event_type_profile": torch.from_numpy(
+                        forecast_targets["future_event_type_profile"]
+                    ),
+                    "future_count_bucket": torch.tensor(
+                        forecast_targets["future_count_bucket"], dtype=torch.long
+                    ),
+                    "future_amount_stats": torch.from_numpy(
+                        forecast_targets["future_amount_stats"]
+                    ),
+                    "future_gap_bucket": torch.tensor(
+                        forecast_targets["future_gap_bucket"], dtype=torch.long
+                    ),
+                    "future_cat_profiles": [
+                        torch.from_numpy(x) for x in forecast_targets["future_cat_profiles"]
+                    ],
+                },
+            }
+
         start, end = self._get_window(n, self.mode)
 
         L = end - start
