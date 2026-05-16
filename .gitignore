@@ -34,7 +34,6 @@ ipython_config.py
 # Data files — не коммитить сырые и обработанные данные
 data/raw/
 data/interim/
-data/processed/
 *.parquet
 *.csv
 *.json.gz

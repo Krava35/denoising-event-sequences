@@ -101,6 +101,120 @@ def compute_pretraining_loss(
     }
 
 
+def compute_diffusion_pretraining_loss(
+    outputs: dict,
+    targets: dict,
+    masks: dict,
+    config: dict,
+) -> dict:
+    loss_cfg = config.get("loss", {})
+    lambda_type = float(loss_cfg.get("lambda_event_type", 1.0))
+    lambda_time = float(loss_cfg.get("lambda_time", 1.0))
+    lambda_num = float(loss_cfg.get("lambda_num", 0.5))
+    lambda_cat = float(loss_cfg.get("lambda_cat", 0.5))
+    lambda_time_eps = float(loss_cfg.get("lambda_time_eps", 0.1))
+    lambda_num_eps = float(loss_cfg.get("lambda_num_eps", 0.1))
+    lambda_d3pm_event_prev = float(
+        config.get("d3pm", {}).get("loss_weight_event_type_prev", 0.0)
+    )
+
+    device = outputs["event_type_logits"].device
+
+    L_type = _masked_cross_entropy(
+        outputs["event_type_logits"],
+        targets["event_type"],
+        masks["event_type"],
+    )
+
+    time_pred = outputs["time_delta_pred"].squeeze(-1)
+    L_time = _masked_huber(time_pred, targets["time_delta"], masks["time_delta"])
+
+    time_eps_pred = outputs["time_delta_eps_pred"].squeeze(-1)
+    time_eps_mask = masks.get("time_delta_eps", masks["time_delta"])
+    if time_eps_mask.any():
+        L_time_eps = F.mse_loss(
+            time_eps_pred[time_eps_mask],
+            targets["time_delta_eps"][time_eps_mask],
+        )
+    else:
+        L_time_eps = torch.zeros((), device=device)
+
+    num_pred = outputs.get("num_pred")
+    if num_pred is not None:
+        num_mask = masks["num_features"]
+        if num_mask.any():
+            m = num_mask.unsqueeze(-1).expand_as(num_pred)
+            L_num = F.huber_loss(num_pred[m], targets["num_features"][m])
+        else:
+            L_num = torch.zeros((), device=device)
+    else:
+        L_num = torch.zeros((), device=device)
+
+    num_eps_pred = outputs.get("num_eps_pred")
+    if num_eps_pred is not None:
+        num_eps_mask = masks.get("num_features_eps", masks["num_features"])
+        if num_eps_mask.any():
+            m = num_eps_mask.unsqueeze(-1).expand_as(num_eps_pred)
+            L_num_eps = F.mse_loss(num_eps_pred[m], targets["num_features_eps"][m])
+        else:
+            L_num_eps = torch.zeros((), device=device)
+    else:
+        L_num_eps = torch.zeros((), device=device)
+
+    cat_logits_list = outputs.get("cat_logits") or []
+    if cat_logits_list:
+        cat_targets = targets["cat_features"]
+        cat_mask = masks["cat_features"]
+        cat_losses = []
+        for j, logits_j in enumerate(cat_logits_list):
+            mask_j = cat_mask[:, :, j] if cat_mask.dim() == 3 else cat_mask
+            if mask_j.any():
+                cat_losses.append(
+                    F.cross_entropy(logits_j[mask_j], cat_targets[:, :, j][mask_j])
+                )
+        L_cat = torch.stack(cat_losses).mean() if cat_losses else torch.zeros((), device=device)
+    else:
+        L_cat = torch.zeros((), device=device)
+
+    has_d3pm_event_prev = (
+        lambda_d3pm_event_prev > 0.0
+        and "event_type_prev_logits" in outputs
+        and "d3pm_event_type_prev" in targets
+        and "d3pm_event_type_prev" in masks
+    )
+    if has_d3pm_event_prev:
+        L_d3pm_event_prev = _masked_cross_entropy(
+            outputs["event_type_prev_logits"],
+            targets["d3pm_event_type_prev"],
+            masks["d3pm_event_type_prev"],
+        )
+    else:
+        L_d3pm_event_prev = torch.zeros((), device=device)
+
+    L_total = (
+        lambda_type * L_type
+        + lambda_time * L_time
+        + lambda_num * L_num
+        + lambda_cat * L_cat
+        + lambda_time_eps * L_time_eps
+        + lambda_num_eps * L_num_eps
+        + lambda_d3pm_event_prev * L_d3pm_event_prev
+    )
+
+    result = {
+        "total": L_total,
+        "event_type": L_type,
+        "time_delta": L_time,
+        "numerical": L_num,
+        "categorical": L_cat,
+        "time_delta_eps": L_time_eps,
+        "numerical_eps": L_num_eps,
+    }
+    if has_d3pm_event_prev:
+        result["d3pm_event_type_prev"] = L_d3pm_event_prev
+    return result
+
+
 def compute_forecast_loss(
     outputs: dict,
     targets: dict,

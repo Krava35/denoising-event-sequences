@@ -1,0 +1,47 @@
+# A13: Final conditional suffix diffusion with prefix-only forecast auxiliary.
+# This is the recommended final architecture after D3PM sampling ablations:
+# keep the DME encoder + diffusion denoising + forecast auxiliary objective,
+# and do not use D3PM as part of the final model.
+
+pretraining:
+  objective: "diffusion"
+
+diffusion:
+  num_steps: 300
+  timestep_sampling: "uniform"
+  beta_start: 0.00003
+  beta_end: 0.012
+  discrete_mask_fraction: 0.60
+
+d3pm:
+  enabled: false
+  use_prev_logits_for_sampling: false
+
+generation:
+  enabled: true
+  mode: "conditional_suffix"
+  suffix_len: 16
+  prefix_min_ratio: 0.40
+  prefix_max_ratio: 0.85
+  sampler: "ddim_lite"
+  num_sampling_steps: 50
+  temperature_event_type: 1.05
+  temperature_cat: 1.0
+  top_k_event_type: 50
+  continuous_update: "x0_eps_blend"
+
+forecasting:
+  enabled: true
+  pretrain_aux_enabled: true
+  pretrain_aux_weight: 0.02
+  finetune_aux_enabled: false
+
+loss_calibration:
+  enabled: false
+
+training:
+  batch_size: 128
+  num_epochs_pretrain: 100
+  lr: 0.00015
+  lr_encoder: 0.00001
+  weight_decay: 0.03

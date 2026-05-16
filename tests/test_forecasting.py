@@ -5,6 +5,7 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 
+from src.corruption.diffusion import ConditionalSuffixDiffusionPipeline
 from src.corruption.pipeline import CorruptionPipeline
 from src.data.collate import collate_fn
 from src.data.dataset import EventSequenceDataset
@@ -22,6 +23,7 @@ from src.models.pooling import get_pooling
 from src.models.tokenizer import MixedEventTokenizer
 from src.training.forecast_pretrain import forecast_pretrain
 from src.training.losses import compute_forecast_loss, compute_pretraining_loss
+from src.training.pretrain import pretrain
 from src.utils.logging import MetricsLogger
 
 
@@ -240,6 +242,52 @@ def test_forecast_dataset_targets_and_collate() -> None:
     assert forecast_targets["future_cat_profiles"][0].ndim == 2
 
 
+def test_pretrain_forecast_aux_dataset_and_suffix_cut_alignment() -> None:
+    torch.manual_seed(0)
+    df, entity_ids, prep, cfg, stats = _bundle()
+    cfg = {
+        **cfg,
+        "pretraining": {"objective": "diffusion"},
+        "diffusion": {"num_steps": 4, "beta_start": 1e-4, "beta_end": 2e-2},
+        "generation": {
+            "enabled": True,
+            "suffix_len": 2,
+            "prefix_min_ratio": 0.5,
+            "prefix_max_ratio": 0.8,
+        },
+        "forecasting": {
+            **cfg["forecasting"],
+            "enabled": True,
+            "pretrain_aux_enabled": True,
+            "pretrain_aux_weight": 0.03,
+        },
+    }
+    dataset = EventSequenceDataset(
+        df,
+        entity_ids,
+        prep,
+        cfg,
+        mode="pretrain",
+        forecast_stats=stats,
+    )
+    batch = collate_fn([dataset[0], dataset[1]])
+
+    assert "forecast_targets" in batch
+    assert "forecast_cut" in batch
+    assert (batch["forecast_cut"] >= 1).all()
+
+    pipe = ConditionalSuffixDiffusionPipeline(
+        cfg,
+        vocab_sizes={
+            "event_type": len(prep.vocab[prep.event_type_col]),
+            "cat_features": [len(prep.vocab[col]) for col in prep.categorical_cols],
+        },
+    )
+    _, _, masks = pipe(batch)
+
+    assert torch.equal(masks["generation_prefix"].sum(dim=1), batch["forecast_cut"])
+
+
 def test_forecast_heads_and_loss_backward() -> None:
     torch.manual_seed(0)
     df, entity_ids, prep, cfg, stats = _bundle()
@@ -383,3 +431,93 @@ def test_forecast_pretrain_one_epoch_saves_checkpoint_and_metrics(tmp_path) -> N
     assert ckpt.endswith("best_forecast_checkpoint.pt")
     assert metrics_logger.metrics_path.exists()
     assert metrics_logger.metrics_path.read_text().strip()
+
+
+def test_diffusion_d3pm_forecast_aux_pretrain_one_epoch(tmp_path) -> None:
+    torch.manual_seed(0)
+    df, entity_ids, prep, cfg, stats = _bundle()
+    cfg = {
+        **cfg,
+        "pretraining": {"objective": "diffusion"},
+        "diffusion": {
+            "num_steps": 4,
+            "beta_start": 1e-4,
+            "beta_end": 2e-2,
+            "discrete_mask_fraction": 0.8,
+        },
+        "generation": {
+            "enabled": True,
+            "suffix_len": 2,
+            "prefix_min_ratio": 0.5,
+            "prefix_max_ratio": 0.8,
+        },
+        "d3pm": {
+            "enabled": True,
+            "apply_to": ["event_type"],
+            "loss_weight_event_type_prev": 0.25,
+            "use_prev_logits_for_sampling": True,
+        },
+        "forecasting": {
+            **cfg["forecasting"],
+            "enabled": True,
+            "pretrain_aux_enabled": True,
+            "pretrain_aux_weight": 0.03,
+        },
+        "loss": {
+            **cfg["loss"],
+            "lambda_time_eps": 0.1,
+            "lambda_num_eps": 0.1,
+        },
+        "loss_calibration": {"enabled": False},
+        "training": {
+            "num_epochs_pretrain": 1,
+            "batch_size": 4,
+            "lr": 1e-3,
+            "weight_decay": 0.0,
+            "warmup_ratio": 0.0,
+            "gradient_clip_val": 1.0,
+            "mixed_precision": False,
+            "log_every_n_steps": 1,
+        },
+    }
+    train_ids = entity_ids[:6]
+    val_ids = entity_ids[6:]
+    vocab_info = _vocab_info(prep, cfg)
+
+    train_loader = DataLoader(
+        EventSequenceDataset(df, train_ids, prep, cfg, mode="pretrain", forecast_stats=stats),
+        batch_size=4,
+        collate_fn=collate_fn,
+    )
+    val_loader = DataLoader(
+        EventSequenceDataset(df, val_ids, prep, cfg, mode="pretrain", forecast_stats=stats),
+        batch_size=2,
+        collate_fn=collate_fn,
+    )
+    model = DMEEncoder(cfg, vocab_info)
+    pipe = ConditionalSuffixDiffusionPipeline(
+        cfg,
+        vocab_sizes={
+            "event_type": vocab_info["event_type_vocab_size"],
+            "cat_features": vocab_info["cat_vocab_sizes"],
+        },
+    )
+    metrics_logger = MetricsLogger(str(tmp_path / "logs"), "diffusion_aux_smoke")
+
+    ckpt = pretrain(
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        corruption_pipeline=pipe,
+        config=cfg,
+        output_dir=str(tmp_path / "checkpoints"),
+        device=torch.device("cpu"),
+        logger=metrics_logger,
+        vocab_info=vocab_info,
+    )
+
+    metrics_text = metrics_logger.metrics_path.read_text()
+    assert (tmp_path / "checkpoints" / "best_checkpoint.pt").exists()
+    assert ckpt.endswith("best_checkpoint.pt")
+    assert "train/loss_d3pm_event_type_prev" in metrics_text
+    assert "train/loss_forecast_total" in metrics_text

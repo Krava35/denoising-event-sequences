@@ -80,5 +80,7 @@ def collate_fn(batch: list[dict]) -> dict:
 
     if "forecast_targets" in batch[0]:
         result["forecast_targets"] = _collate_forecast_targets(batch)
+    if "forecast_cut" in batch[0]:
+        result["forecast_cut"] = torch.stack([item["forecast_cut"] for item in batch]).long()
 
     return result

@@ -1,0 +1,35 @@
+{
+  "raw_duplicate_entity_timestamp_pairs": 156564,
+  "canonical_duplicate_entity_timestamp_pairs": 0,
+  "official_test_ignored": true,
+  "dataset": "gender",
+  "raw_root": "/kaggle/working/data/raw",
+  "raw_dataset_dir": "/kaggle/working/data/raw/gender",
+  "rows": 3751083,
+  "entities": 8400,
+  "unique_event_types": 184,
+  "class_counts": {
+    "0": 4687,
+    "1": 3713
+  },
+  "sequence_length": {
+    "min": 1,
+    "p25": 161.0,
+    "p50": 325.5,
+    "mean": 446.5575,
+    "p75": 563.0,
+    "p95": 1096.0,
+    "max": 88781
+  },
+  "output_dir": "/kaggle/working/data/processed/gender_benchmark",
+  "split_sizes": {
+    "train": 5880,
+    "val": 1260,
+    "test": 1260
+  },
+  "event_type_vocab_size": 189,
+  "categorical_vocab_sizes": {
+    "tr_type": 76,
+    "term_id": 54454
+  }
+}

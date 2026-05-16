@@ -1,7 +1,7 @@
-"""Run DME-Encoder ablation sweep (A0–A7).
+"""Run DME-Encoder ablation sweep (A0-A9).
 
-A0 is a supervised baseline (no pretraining). A1–A7 perform denoising
-pretraining followed by fine-tuning, each adding one more component.
+A0 is a supervised baseline (no pretraining). A1-A9 perform pretraining
+followed by fine-tuning, each adding one more component.
 
 Produces outputs/metrics/ablations.csv with one row per ablation.
 """
@@ -22,6 +22,7 @@ from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from src.corruption.diffusion import ConditionalSuffixDiffusionPipeline, DiffusionCorruptionPipeline
 from src.corruption.pipeline import CorruptionPipeline
 from src.corruption.transition_matrix import TransitionMatrix
 from src.data.collate import collate_fn
@@ -53,6 +54,8 @@ _ALL_ABLATIONS = [
     "configs/ablations/A5_gated_pooling.yaml",
     "configs/ablations/A6_hybrid_backbone.yaml",
     "configs/ablations/A7_full_dme.yaml",
+    "configs/ablations/A8_multistep_diffusion.yaml",
+    "configs/ablations/A9_conditional_generation.yaml",
 ]
 
 # A0 is the supervised baseline: fine-tune from random init, no pretraining.
@@ -190,17 +193,30 @@ def _run_one_ablation(
 
     pretrained_ckpt = None
 
-    # ── Pretraining (A1–A7 only) ───────────────────────────────────────────
+    # ── Pretraining (A1-A9 only) ───────────────────────────────────────────
     if short_id not in _NO_PRETRAIN_IDS:
-        corruption_pipeline = CorruptionPipeline(
-            config=config.get("corruption", {}),
-            transition_matrix=transition_matrix,
-            vocab_sizes={
-                "event_type": vocab_info["event_type_vocab_size"],
-                "cat_features": vocab_info["cat_vocab_sizes"],
-            },
-            time_transform=config.get("data", {}).get("time_transform", "log1p"),
-        )
+        objective = config.get("pretraining", {}).get("objective", "denoising")
+        vocab_sizes = {
+            "event_type": vocab_info["event_type_vocab_size"],
+            "cat_features": vocab_info["cat_vocab_sizes"],
+        }
+        if objective == "diffusion":
+            pipeline_cls = (
+                ConditionalSuffixDiffusionPipeline
+                if config.get("generation", {}).get("enabled", False)
+                else DiffusionCorruptionPipeline
+            )
+            corruption_pipeline = pipeline_cls(
+                config=config,
+                vocab_sizes=vocab_sizes,
+            )
+        else:
+            corruption_pipeline = CorruptionPipeline(
+                config=config.get("corruption", {}),
+                transition_matrix=transition_matrix,
+                vocab_sizes=vocab_sizes,
+                time_transform=config.get("data", {}).get("time_transform", "log1p"),
+            )
         model = DMEEncoder(config, vocab_info)
         pretrain_train, pretrain_val, _ = _build_loaders(
             df_events, splits, preprocessor, config, batch_size, mode_train="pretrain"

@@ -1,0 +1,34 @@
+{
+  "raw_duplicate_entity_timestamp_pairs": 11791097,
+  "canonical_duplicate_entity_timestamp_pairs": 0,
+  "official_test_ignored": true,
+  "dataset": "age_group",
+  "raw_root": "/kaggle/working/data/raw",
+  "raw_dataset_dir": "/kaggle/working/data/raw/age-group",
+  "rows": 26450577,
+  "entities": 30000,
+  "unique_event_types": 202,
+  "class_counts": {
+    "0": 7434,
+    "1": 7497,
+    "2": 7560,
+    "3": 7509
+  },
+  "sequence_length": {
+    "min": 700,
+    "p25": 774.0,
+    "p50": 863.0,
+    "mean": 881.6859,
+    "p75": 977.0,
+    "p95": 1108.0499999999993,
+    "max": 1150
+  },
+  "output_dir": "/kaggle/working/data/processed/age_group_benchmark",
+  "split_sizes": {
+    "train": 21000,
+    "val": 4500,
+    "test": 4500
+  },
+  "event_type_vocab_size": 198,
+  "categorical_vocab_sizes": {}
+}

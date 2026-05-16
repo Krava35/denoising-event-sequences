@@ -1,0 +1,46 @@
+# A12: A9 conditional suffix diffusion with both D3PM and forecast auxiliaries.
+
+pretraining:
+  objective: "diffusion"
+
+diffusion:
+  num_steps: 300
+  timestep_sampling: "uniform"
+  beta_start: 0.00003
+  beta_end: 0.012
+  discrete_mask_fraction: 0.60
+
+d3pm:
+  enabled: true
+  apply_to: ["event_type"]
+  transition: "absorbing_uniform"
+  loss_weight_event_type_prev: 0.25
+  use_prev_logits_for_sampling: true
+
+generation:
+  enabled: true
+  mode: "conditional_suffix"
+  suffix_len: 16
+  prefix_min_ratio: 0.40
+  prefix_max_ratio: 0.85
+  sampler: "ddim_lite"
+  num_sampling_steps: 50
+  temperature_event_type: 1.05
+  temperature_cat: 1.0
+  top_k_event_type: 50
+  continuous_update: "x0_eps_blend"
+
+forecasting:
+  enabled: true
+  pretrain_aux_enabled: true
+  pretrain_aux_weight: 0.03
+
+loss_calibration:
+  enabled: false
+
+training:
+  batch_size: 128
+  num_epochs_pretrain: 100
+  lr: 0.00015
+  lr_encoder: 0.00001
+  weight_decay: 0.03
