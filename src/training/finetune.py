@@ -50,6 +50,8 @@ def _save_finetune_checkpoint(
     config: dict,
     path: str,
     vocab_info: Optional[dict] = None,
+    selection_score: float | None = None,
+    selection_metric: str | None = None,
 ) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     torch.save(
@@ -58,6 +60,8 @@ def _save_finetune_checkpoint(
             "optimizer_state_dict": optimizer.state_dict(),
             "epoch": epoch,
             "val_roc_auc": val_metrics.get("roc_auc", 0.0),
+            "selection_metric": selection_metric,
+            "selection_score": selection_score,
             "val_metrics": val_metrics,
             "config": config,
             "vocab_info": vocab_info,
@@ -138,6 +142,25 @@ def evaluate_finetune(
     return metrics
 
 
+def _select_validation_score(val_metrics: dict, config: dict) -> tuple[str, float]:
+    configured = config.get("training", {}).get("selection_metric")
+    candidate_metrics = [
+        configured,
+        "roc_auc",
+        "roc_auc_ovr",
+        "macro_f1",
+        "balanced_accuracy",
+        "accuracy",
+    ]
+    for metric_name in candidate_metrics:
+        if metric_name and metric_name in val_metrics:
+            return metric_name, float(val_metrics[metric_name])
+    raise KeyError(
+        "Could not choose validation selection metric from keys: "
+        f"{sorted(val_metrics.keys())}"
+    )
+
+
 def finetune(
     model: DMEEncoder,
     train_loader: DataLoader,
@@ -183,7 +206,7 @@ def finetune(
     model.to(device)
     model.train()
 
-    best_roc_auc = -float("inf")
+    best_score = -float("inf")
     patience_counter = 0
     best_checkpoint_path = os.path.join(output_dir, "best_finetune_checkpoint.pt")
     global_step = 0
@@ -226,14 +249,21 @@ def finetune(
         val_metrics = evaluate_finetune(model, val_loader, num_classes, device)
         logger.log_epoch(epoch, {f"val/{k}": v for k, v in val_metrics.items()})
 
-        # Early stopping on ROC-AUC (maximize)
-        roc_auc = val_metrics["roc_auc"]
-        if roc_auc > best_roc_auc:
-            best_roc_auc = roc_auc
+        # Early stopping on a configured metric if present; fall back to AUC/F1.
+        selection_metric, selection_score = _select_validation_score(val_metrics, config)
+        if selection_score > best_score:
+            best_score = selection_score
             patience_counter = 0
             _save_finetune_checkpoint(
-                model, optimizer, epoch, val_metrics, config,
-                best_checkpoint_path, vocab_info,
+                model,
+                optimizer,
+                epoch,
+                val_metrics,
+                config,
+                best_checkpoint_path,
+                vocab_info,
+                selection_score=selection_score,
+                selection_metric=selection_metric,
             )
         else:
             patience_counter += 1

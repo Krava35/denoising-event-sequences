@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+
 import pytest
 import torch
 import torch.nn as nn
@@ -165,6 +167,43 @@ def test_pretrain_mode(model: DMEEncoder, batch: dict) -> None:
         tensors = val if isinstance(val, list) else [val]
         for t in tensors:
             assert t.isfinite().all(), f"pretrain output '{key}' contains NaN/Inf"
+
+
+def test_diffusion_pretrain_mode(batch: dict) -> None:
+    config = copy.deepcopy(CONFIG)
+    config["pretraining"] = {"objective": "diffusion"}
+    config["diffusion"] = {"num_steps": 32}
+    model = DMEEncoder(config, VOCAB_INFO)
+    diffusion_batch = {**batch, "diffusion_t": torch.randint(1, 33, (B,))}
+
+    out = model(diffusion_batch, mode="pretrain")
+
+    assert out["event_type_logits"].shape == (B, L, 20)
+    assert out["time_delta_pred"].shape == (B, L, 1)
+    assert out["time_delta_eps_pred"].shape == (B, L, 1)
+    assert out["num_pred"].shape == (B, L, 3)
+    assert out["num_eps_pred"].shape == (B, L, 3)
+    assert out["hidden_states"].shape == (B, L, H)
+
+    for key, val in out.items():
+        tensors = val if isinstance(val, list) else [val]
+        for t in tensors:
+            assert t.isfinite().all(), f"diffusion output '{key}' contains NaN/Inf"
+
+
+def test_diffusion_d3pm_pretrain_mode(batch: dict) -> None:
+    config = copy.deepcopy(CONFIG)
+    config["pretraining"] = {"objective": "diffusion"}
+    config["diffusion"] = {"num_steps": 32}
+    config["d3pm"] = {"enabled": True, "apply_to": ["event_type"]}
+    model = DMEEncoder(config, VOCAB_INFO)
+    diffusion_batch = {**batch, "diffusion_t": torch.randint(1, 33, (B,))}
+
+    out = model(diffusion_batch, mode="pretrain")
+
+    assert out["event_type_prev_logits"].shape == (B, L, 20)
+    assert out["event_type_prev_logits"].isfinite().all()
+    assert "event_type_prev_head" in model.count_parameters()
 
 
 # ── DMEEncoder finetune ───────────────────────────────────────────────────────

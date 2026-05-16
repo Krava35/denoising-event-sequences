@@ -1,0 +1,20 @@
+# A8: Multi-step diffusion denoising without sampler.
+# Fixed-length denoising objective used as generation-prep ablation.
+
+pretraining:
+  objective: "diffusion"
+
+diffusion:
+  num_steps: 100
+  timestep_sampling: "uniform"
+  beta_start: 0.0001
+  beta_end: 0.02
+  discrete_mask_fraction: 0.80
+
+loss:
+  lambda_event_type: 1.0
+  lambda_time: 1.0
+  lambda_num: 0.5
+  lambda_cat: 0.5
+  lambda_time_eps: 0.1
+  lambda_num_eps: 0.1

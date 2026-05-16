@@ -6,6 +6,9 @@ project:
 seed:
   global_seed: 42
 
+pretraining:
+  objective: "denoising"                 # denoising | diffusion
+
 data:
   max_seq_len: 256
   min_seq_len: 2
@@ -80,6 +83,39 @@ corruption:
     # Mask the entire event on a position (NOT insert/delete — length unchanged).
     prob: 0.10
 
+# ── Diffusion denoising ───────────────────────────────────────────────────────
+# Used only when pretraining.objective="diffusion".
+diffusion:
+  num_steps: 100
+  timestep_sampling: "uniform"
+  beta_start: 0.0001
+  beta_end: 0.02
+  discrete_mask_fraction: 0.80
+
+# ── Discrete D3PM auxiliary ───────────────────────────────────────────────────
+# Used as an optional auxiliary reverse-step loss for diffusion pretraining.
+d3pm:
+  enabled: false
+  apply_to: ["event_type"]
+  transition: "absorbing_uniform"
+  loss_weight_event_type_prev: 0.25
+  use_prev_logits_for_sampling: true
+
+# ── Conditional event generation ──────────────────────────────────────────────
+# Used only when explicitly enabled by an ablation/script.
+generation:
+  enabled: false
+  mode: "conditional_suffix"
+  suffix_len: 16
+  prefix_min_ratio: 0.50
+  prefix_max_ratio: 0.80
+  sampler: "ddim_lite"
+  num_sampling_steps: 50
+  temperature_event_type: 1.0
+  temperature_cat: 1.0
+  top_k_event_type: 20
+  continuous_update: "x0_eps_blend"
+
 # ── Model ─────────────────────────────────────────────────────────────────────
 model:
   event_type_emb_dim: 64
@@ -115,6 +151,8 @@ forecasting:
   lambda_amount: 0.5
   lambda_gap: 0.3
   lambda_cat_profile: 0.5
+  pretrain_aux_enabled: false
+  pretrain_aux_weight: 0.03
   finetune_aux_enabled: false
   finetune_aux_weight: 0.05
 
@@ -125,6 +163,8 @@ loss:
   lambda_num: 0.5
   lambda_cat: 0.5
   lambda_exist: 0.1
+  lambda_time_eps: 0.1
+  lambda_num_eps: 0.1
 
 loss_calibration:
   enabled: true

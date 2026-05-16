@@ -9,8 +9,8 @@ Steps:
   5.  make_entity_splits — stratified by target, strict entity-level
   6.  Save splits.json
   7.  Fit EventPreprocessor on train split only
-  8.  Transform entire dataset
-  9.  Save events.parquet  (scaled features, vocab indices)
+  8.  Save events.parquet (raw pre-transform events for EventSequenceDataset)
+  9.  Save transformed_events.parquet (diagnostic cache with scaled/vocab features)
   10. Save preprocessor.pkl
   11. Print statistics
 
@@ -315,16 +315,26 @@ def main() -> None:
     preprocessor = EventPreprocessor(config)
     preprocessor.fit(df, splits["train"])
 
-    # ── 8. Transform entire dataset ───────────────────────────────────────────
+    # ── 8. Save raw events ────────────────────────────────────────────────────
+    # EventSequenceDataset applies the fitted preprocessor internally. Therefore
+    # events.parquet must stay raw/pre-transform; otherwise training double-encodes
+    # event_type/categorical ids and double-scales continuous features.
+    events_path = output_dir / "events.parquet"
+    df.to_parquet(events_path, index=False)
+    size_mb = events_path.stat().st_size / 1e6
+    logger.info("Saved raw events.parquet → %s  (%.1f MB)", events_path, size_mb)
+
+    # ── 9. Save transformed diagnostic cache ──────────────────────────────────
     # time_delta column is recomputed internally and replaced with log1p-scaled version.
     transformed = preprocessor.transform(df)
-    logger.info("Transformed dataset: %d events, %d columns", len(transformed), len(transformed.columns))
-
-    # ── 9. Save events ────────────────────────────────────────────────────────
-    events_path = output_dir / "events.parquet"
-    transformed.to_parquet(events_path, index=False)
-    size_mb = events_path.stat().st_size / 1e6
-    logger.info("Saved events.parquet → %s  (%.1f MB)", events_path, size_mb)
+    transformed_path = output_dir / "transformed_events.parquet"
+    transformed.to_parquet(transformed_path, index=False)
+    transformed_size_mb = transformed_path.stat().st_size / 1e6
+    logger.info(
+        "Saved transformed_events.parquet → %s  (%.1f MB)",
+        transformed_path,
+        transformed_size_mb,
+    )
 
     # ── 10. Save preprocessor ─────────────────────────────────────────────────
     prep_path = output_dir / "preprocessor.pkl"
@@ -332,7 +342,7 @@ def main() -> None:
         pickle.dump(preprocessor, f, protocol=pickle.HIGHEST_PROTOCOL)
     logger.info("Saved preprocessor.pkl → %s", prep_path)
 
-    # ── 12. Statistics ────────────────────────────────────────────────────────
+    # ── 11. Statistics ────────────────────────────────────────────────────────
     _print_stats(df, splits, preprocessor, config)
 
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from src.training.losses import compute_pretraining_loss
+from src.training.losses import compute_diffusion_pretraining_loss, compute_pretraining_loss
 
 B, L = 4, 16
 V_TYPE = 20
@@ -17,6 +17,8 @@ CONFIG = {
         "lambda_num": 0.5,
         "lambda_cat": 0.5,
         "lambda_exist": 0.1,
+        "lambda_time_eps": 0.1,
+        "lambda_num_eps": 0.1,
     }
 }
 
@@ -36,6 +38,13 @@ def _make_outputs(device: str = "cpu") -> dict:
     }
 
 
+def _make_diffusion_outputs(device: str = "cpu") -> dict:
+    outputs = _make_outputs(device)
+    outputs["time_delta_eps_pred"] = torch.randn(B, L, 1, device=device, requires_grad=True)
+    outputs["num_eps_pred"] = torch.randn(B, L, N_NUM, device=device, requires_grad=True)
+    return outputs
+
+
 def _make_targets(device: str = "cpu") -> dict:
     return {
         "event_type": torch.randint(0, V_TYPE, (B, L), device=device),
@@ -46,6 +55,13 @@ def _make_targets(device: str = "cpu") -> dict:
             dim=-1,
         ),
     }
+
+
+def _make_diffusion_targets(device: str = "cpu") -> dict:
+    targets = _make_targets(device)
+    targets["time_delta_eps"] = torch.randn(B, L, device=device)
+    targets["num_features_eps"] = torch.randn(B, L, N_NUM, device=device)
+    return targets
 
 
 def _full_masks(device: str = "cpu") -> dict:
@@ -59,6 +75,13 @@ def _full_masks(device: str = "cpu") -> dict:
     }
 
 
+def _full_diffusion_masks(device: str = "cpu") -> dict:
+    masks = _full_masks(device)
+    masks["time_delta_eps"] = torch.ones(B, L, dtype=torch.bool, device=device)
+    masks["num_features_eps"] = torch.ones(B, L, dtype=torch.bool, device=device)
+    return masks
+
+
 def _padded_masks(pad_start: int = 12, device: str = "cpu") -> dict:
     m = _full_masks(device)
     m["attention_mask"][:, pad_start:] = False
@@ -67,6 +90,15 @@ def _padded_masks(pad_start: int = 12, device: str = "cpu") -> dict:
     m["num_features"][:, pad_start:] = False
     m["cat_features"][:, pad_start:, :] = False
     m["event_level"][:, pad_start:] = False
+    return m
+
+
+def _padded_diffusion_masks(pad_start: int = 12, device: str = "cpu") -> dict:
+    m = _padded_masks(pad_start, device)
+    m["time_delta_eps"] = torch.ones(B, L, dtype=torch.bool, device=device)
+    m["num_features_eps"] = torch.ones(B, L, dtype=torch.bool, device=device)
+    m["time_delta_eps"][:, pad_start:] = False
+    m["num_features_eps"][:, pad_start:] = False
     return m
 
 
@@ -142,3 +174,84 @@ def test_gradient_flow() -> None:
     for j, logits_j in enumerate(outputs["cat_logits"]):
         assert logits_j.grad is not None, f"cat_logits[{j}].grad is None"
     assert outputs["existence_logits"].grad is not None
+
+
+def test_diffusion_loss_components_and_gradients() -> None:
+    torch.manual_seed(42)
+    outputs = _make_diffusion_outputs()
+    targets = _make_diffusion_targets()
+    masks = _full_diffusion_masks()
+
+    result = compute_diffusion_pretraining_loss(outputs, targets, masks, CONFIG)
+    result["total"].backward()
+
+    for key in [
+        "event_type",
+        "time_delta",
+        "numerical",
+        "categorical",
+        "time_delta_eps",
+        "numerical_eps",
+    ]:
+        assert result[key].item() > 0.0, f"'{key}' loss should be positive"
+    assert result["total"].item() > 0.0
+    assert outputs["time_delta_eps_pred"].grad is not None
+    assert outputs["num_eps_pred"].grad is not None
+
+
+def test_diffusion_loss_d3pm_auxiliary_component() -> None:
+    torch.manual_seed(42)
+    outputs = _make_diffusion_outputs()
+    outputs["event_type_prev_logits"] = torch.randn(
+        B,
+        L,
+        V_TYPE,
+        requires_grad=True,
+    )
+    targets = _make_diffusion_targets()
+    targets["d3pm_event_type_prev"] = torch.randint(0, V_TYPE, (B, L))
+    masks = _full_diffusion_masks()
+    masks["d3pm_event_type_prev"] = torch.ones(B, L, dtype=torch.bool)
+    config = {
+        **CONFIG,
+        "d3pm": {
+            "enabled": True,
+            "loss_weight_event_type_prev": 0.25,
+        },
+    }
+
+    result = compute_diffusion_pretraining_loss(outputs, targets, masks, config)
+    result["total"].backward()
+
+    assert result["d3pm_event_type_prev"].item() > 0.0
+    assert outputs["event_type_prev_logits"].grad is not None
+
+
+def test_diffusion_loss_ignores_padding() -> None:
+    torch.manual_seed(42)
+    outputs = _make_diffusion_outputs()
+    targets = _make_diffusion_targets()
+    masks = _padded_diffusion_masks()
+
+    result_ref = compute_diffusion_pretraining_loss(outputs, targets, masks, CONFIG)
+
+    targets_mod = {k: v.clone() for k, v in targets.items()}
+    targets_mod["event_type"][:, 12:] = V_TYPE - 1
+    targets_mod["time_delta"][:, 12:] = 99999.0
+    targets_mod["time_delta_eps"][:, 12:] = 99999.0
+    targets_mod["num_features"][:, 12:] = 99999.0
+    targets_mod["num_features_eps"][:, 12:] = 99999.0
+    targets_mod["cat_features"][:, 12:] = V_CAT[0] - 1
+
+    result_mod = compute_diffusion_pretraining_loss(outputs, targets_mod, masks, CONFIG)
+
+    for key in [
+        "total",
+        "event_type",
+        "time_delta",
+        "numerical",
+        "categorical",
+        "time_delta_eps",
+        "numerical_eps",
+    ]:
+        assert torch.allclose(result_ref[key], result_mod[key])
